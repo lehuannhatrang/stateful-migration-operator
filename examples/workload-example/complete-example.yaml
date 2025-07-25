@@ -1,0 +1,182 @@
+---
+# Complete example: Workload + Propagation + StatefulMigration
+# This file demonstrates the full workflow:
+# 1. Deploy workload (Pod + Service)
+# 2. Propagate to cluster-criu via Karmada
+# 3. Enable migration backup via StatefulMigration CR
+
+# =====================================================
+# 1. WORKLOAD RESOURCES
+# =====================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inmem-go-app
+  labels:
+    app.kubernetes.io/name: inmem-go
+    environment: demo
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inmem-go-app
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    version: v1
+    component: server
+    # This label will be added by migration backup controller
+    # checkpoint-migration.dcn.io: "True"
+spec:
+  containers:
+    - name: inmem-go-server
+      image: lehuannhatrang/inmem-go-server:v1
+      ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+      env:
+        - name: PORT
+          value: "8080"
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "50m"
+        limits:
+          memory: "128Mi"
+          cpu: "100m"
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+  restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inmem-go-service
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    component: service
+spec:
+  type: NodePort
+  selector:
+    app: inmem-go
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+      nodePort: 30180
+  sessionAffinity: None
+
+# =====================================================
+# 2. KARMADA PROPAGATION POLICY
+# =====================================================
+
+---
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: inmem-go-propagation
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    policy-type: workload-propagation
+spec:
+  # Resource selectors - specify which resources to propagate
+  resourceSelectors:
+    - apiVersion: v1
+      kind: Namespace
+      name: inmem-go-app
+    - apiVersion: v1
+      kind: Pod
+      namespace: inmem-go-app
+      name: inmem-go-app
+    - apiVersion: v1
+      kind: Service
+      namespace: inmem-go-app
+      name: inmem-go-service
+  
+  # Placement - specify target clusters
+  placement:
+    clusterAffinity:
+      clusterNames:
+        - cluster-criu
+
+# =====================================================
+# 3. REGISTRY SECRET FOR CHECKPOINT STORAGE
+# =====================================================
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-secret
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    component: registry-auth
+type: Opaque
+data:
+  # IMPORTANT: Replace with your actual registry credentials (base64 encoded)
+  # echo -n "your-username" | base64
+  # echo -n "your-password" | base64
+  username: bGVodWFubmhhdHJhbmc=  # lehuannhatrang (example)
+  password: eW91ci1kb2NrZXItcGFzc3dvcmQ=  # your-docker-password (REPLACE THIS!)
+
+# =====================================================
+# 4. STATEFUL MIGRATION CR
+# =====================================================
+
+---
+apiVersion: migration.dcn.io/v1
+kind: StatefulMigration
+metadata:
+  name: inmem-go-migration
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    migration-type: pod-checkpoint
+    target-cluster: cluster-criu
+  annotations:
+    description: "Enable checkpoint backups for inmem-go pod running on cluster-criu"
+    created-by: "migration-backup-controller"
+spec:
+  # Reference to the workload resource we want to migrate
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: inmem-go-app
+    name: inmem-go-app
+  
+  # Source clusters where the workload is running
+  # After Karmada propagation, the pod will be on cluster-criu
+  sourceClusters:
+    - cluster-criu
+  
+  # Registry configuration for storing checkpoint images
+  registry:
+    url: docker.io
+    repository: lehuannhatrang/checkpoints
+    secretRef:
+      name: registry-secret
+  
+  # Schedule for periodic checkpoint backups (cron format)
+  # Every 5 minutes for demo purposes
+  # Production: consider "0 */6 * * *" (every 6 hours) or "0 2 * * *" (daily at 2 AM)
+  schedule: "*/5 * * * *" 

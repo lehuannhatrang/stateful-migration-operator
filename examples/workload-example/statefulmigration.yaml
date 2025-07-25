@@ -1,0 +1,47 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-secret
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    component: registry-auth
+type: Opaque
+data:
+  # Replace with your actual registry credentials (base64 encoded)
+  username: bGVodWFubmhhdHJhbmc=  # lehuannhatrang (example)
+  password: eW91ci1kb2NrZXItcGFzc3dvcmQ=  # your-docker-password (example)
+---
+apiVersion: migration.dcn.io/v1
+kind: StatefulMigration
+metadata:
+  name: inmem-go-migration
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    migration-type: pod-checkpoint
+    target-cluster: cluster-criu
+spec:
+  # Reference to the workload resource we want to migrate
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: inmem-go-app
+    name: inmem-go-app
+  
+  # Source clusters where the workload is running
+  # After Karmada propagation, the pod will be on cluster-criu
+  sourceClusters:
+    - cluster-criu
+  
+  # Registry configuration for storing checkpoint images
+  registry:
+    url: docker.io
+    repository: lehuannhatrang/checkpoints
+    secretRef:
+      name: registry-secret
+  
+  # Schedule for periodic checkpoint backups (cron format)
+  # Every 5 minutes for demo purposes (adjust as needed)
+  schedule: "*/5 * * * *" 

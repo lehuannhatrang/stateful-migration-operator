@@ -9,26 +9,40 @@ This example demonstrates how to deploy a workload (`inmem-go` application) and 
 | `inmem-go-workload.yaml` | Pod and Service definitions for the inmem-go application |
 | `propagation-policy.yaml` | Karmada PropagationPolicy to propagate to cluster-criu |
 | `cluster-propagation-policy.yaml` | Alternative ClusterPropagationPolicy (cluster-wide) |
-| `deploy-workload.sh` | Automated deployment script |
+| `statefulmigration.yaml` | StatefulMigration CR + Registry Secret for checkpoint backups |
+| `complete-example.yaml` | All-in-one file with workload + propagation + StatefulMigration |
+| `deploy-workload.sh` | Automated deployment script (workload + propagation only) |
+| `deploy-complete.sh` ✅ | Complete deployment script (includes StatefulMigration) |
 | `README.md` | This documentation |
 
 ## 🚀 Quick Deployment
 
-### **Option 1: Automated Script (Recommended)**
+### **Option 1: Complete StatefulMigration Workflow (Recommended)**
 
 ```bash
 # Navigate to the example directory
 cd examples/workload-example
 
-# Deploy with your Karmada kubeconfig
+# Complete deployment with StatefulMigration
+./deploy-complete.sh ~/.kube/karmada-config ~/.kube/mgmt-config your-docker-username
+
+# This deploys: workload + propagation + StatefulMigration CR
+# The script will prompt for your Docker password securely
+```
+
+### **Option 2: Workload + Propagation Only**
+
+```bash
+# Deploy just workload and propagation (no StatefulMigration)
 ./deploy-workload.sh ~/.kube/karmada-apiserver-config
 
 # Or use ClusterPropagationPolicy
 ./deploy-workload.sh ~/.kube/karmada-apiserver-config cluster
 ```
 
-### **Option 2: Manual Deployment**
+### **Option 3: Manual Deployment**
 
+#### **Workload + Propagation Only**
 ```bash
 # Set Karmada kubeconfig (if different from current context)
 export KUBECONFIG=~/.kube/karmada-apiserver-config
@@ -44,6 +58,23 @@ kubectl get propagationpolicy inmem-go-propagation -n inmem-go-app
 kubectl get resourcebinding -A | grep inmem-go
 ```
 
+#### **Complete Workflow (Workload + Propagation + StatefulMigration)**
+```bash
+# Set Karmada kubeconfig
+export KUBECONFIG=~/.kube/karmada-apiserver-config
+
+# Deploy everything at once
+kubectl apply -f complete-example.yaml
+
+# OR deploy step by step
+kubectl apply -f inmem-go-workload.yaml
+kubectl apply -f propagation-policy.yaml
+kubectl apply -f statefulmigration.yaml  # includes registry secret
+
+# Check StatefulMigration status
+kubectl get statefulmigration inmem-go-migration -n inmem-go-app
+```
+
 ## 📋 What Gets Deployed
 
 ### **1. Workload Resources**
@@ -55,6 +86,14 @@ kubectl get resourcebinding -A | grep inmem-go
 - **Target Cluster**: `cluster-criu`
 - **Resources**: Propagates namespace, pod, and service
 - **Policy Name**: `inmem-go-propagation`
+
+### **3. StatefulMigration CR (Optional)**
+- **Migration Name**: `inmem-go-migration`
+- **Target Resource**: The `inmem-go-app` pod
+- **Source Cluster**: `cluster-criu` (where pod runs after propagation)
+- **Registry**: `docker.io/your-username/checkpoints`
+- **Schedule**: Every 5 minutes (`*/5 * * * *`)
+- **Function**: Enables checkpoint backup monitoring by migration controller
 
 ## 🔍 Verification Commands
 
@@ -244,4 +283,56 @@ After successful deployment and propagation:
 - **Resource Limits**: 100m CPU, 128Mi memory
 - **Resource Requests**: 50m CPU, 64Mi memory
 
-The application will be accessible on `cluster-criu` at `http://<any-node-ip>:30180` once propagation is complete. 
+The application will be accessible on `cluster-criu` at `http://<any-node-ip>:30180` once propagation is complete.
+
+## 🔄 **StatefulMigration Workflow**
+
+When you deploy the `StatefulMigration` CR, here's what happens:
+
+1. **Migration Controller Detection**: The migration backup controller (deployed on mgmt-cluster) detects the new `StatefulMigration` CR
+2. **Label Addition**: Controller adds `checkpoint-migration.dcn.io: "True"` label to the target pod
+3. **CheckpointBackup Creation**: Controller creates `CheckpointBackup` resources for each source cluster (cluster-criu)
+4. **Karmada Propagation**: CheckpointBackup resources are propagated to cluster-criu via Karmada
+5. **Checkpoint Execution**: On cluster-criu, checkpoint backups are created every 5 minutes
+6. **Registry Storage**: Checkpoint images are pushed to `docker.io/your-username/checkpoints`
+
+### **StatefulMigration CR Structure**
+```yaml
+apiVersion: migration.dcn.io/v1
+kind: StatefulMigration
+metadata:
+  name: inmem-go-migration
+  namespace: inmem-go-app
+spec:
+  resourceRef:          # Target workload to backup
+    apiVersion: v1
+    kind: Pod
+    namespace: inmem-go-app
+    name: inmem-go-app
+  sourceClusters:       # Where the workload runs
+    - cluster-criu
+  registry:             # Where to store checkpoints
+    url: docker.io
+    repository: your-username/checkpoints
+    secretRef:
+      name: registry-secret
+  schedule: "*/5 * * * *"  # Backup frequency
+```
+
+### **Verification Commands for StatefulMigration**
+```bash
+# Check StatefulMigration resource
+kubectl get statefulmigration inmem-go-migration -n inmem-go-app
+
+# Check if migration label was added to pod
+kubectl get pod inmem-go-app -n inmem-go-app --show-labels
+
+# Check CheckpointBackup resources (on mgmt cluster)
+kubectl get checkpointbackup -A
+
+# Check migration controller logs
+kubectl logs -n stateful-migration deployment/migration-backup-controller -f
+
+# Check propagated CheckpointBackup on cluster-criu
+kubectl --context=cluster-criu get checkpointbackup -A
+``` 
