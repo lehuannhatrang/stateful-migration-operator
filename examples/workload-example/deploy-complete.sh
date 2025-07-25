@@ -165,10 +165,28 @@ EOF
 print_success "Registry secret created with provided credentials"
 
 # =====================================================
-# STEP 3: Deploy StatefulMigration CR
+# STEP 3: Deploy StatefulMigration CR (to mgmt-cluster)
 # =====================================================
 
-print_step "3. Deploying StatefulMigration CR"
+print_step "3. Deploying StatefulMigration CR to mgmt-cluster"
+
+# Switch to management cluster for StatefulMigration CR
+if [[ -n "$MGMT_KUBECONFIG" ]]; then
+    print_status "Switching to management cluster: $MGMT_KUBECONFIG"
+    export KUBECONFIG="$MGMT_KUBECONFIG"
+else
+    print_status "Using current kubeconfig for management cluster"
+fi
+
+# Check if migration CRDs are installed
+print_status "Checking if migration CRDs are installed on mgmt-cluster..."
+if ! kubectl get crd statefulmigrations.migration.dcnlab.com >/dev/null 2>&1; then
+    print_error "StatefulMigration CRD not found on mgmt-cluster"
+    print_status "Please install CRDs first:"
+    print_status "  kubectl apply -f config/crd/bases/"
+    exit 1
+fi
+print_success "Migration CRDs are installed"
 
 # Create StatefulMigration with correct registry info
 cat <<EOF | kubectl apply -f -
@@ -176,7 +194,7 @@ apiVersion: migration.dcnlab.com/v1
 kind: StatefulMigration
 metadata:
   name: inmem-go-migration
-  namespace: inmem-go-app
+  namespace: stateful-migration
   labels:
     app: inmem-go
     migration-type: pod-checkpoint
@@ -200,17 +218,13 @@ spec:
   schedule: "*/5 * * * *"
 EOF
 
-print_success "StatefulMigration CR deployed"
+print_success "StatefulMigration CR deployed to mgmt-cluster"
 
 # =====================================================
-# STEP 4: Verify on Management Cluster (if available)
+# STEP 4: Verify on Management Cluster
 # =====================================================
 
-if [[ -n "$MGMT_KUBECONFIG" ]]; then
-    print_step "4. Checking migration backup controller on management cluster"
-    
-    # Switch to management cluster
-    export KUBECONFIG="$MGMT_KUBECONFIG"
+print_step "4. Verifying migration backup controller on management cluster"
     
     print_status "Checking controller deployment..."
     kubectl get deployment migration-backup-controller -n stateful-migration >/dev/null 2>&1 && \
@@ -225,12 +239,15 @@ if [[ -n "$MGMT_KUBECONFIG" ]]; then
         print_success "CheckpointBackup resources are being created!" || \
         print_status "CheckpointBackup resources not yet created (controller may still be processing)"
     
-    # Switch back to Karmada
-    if [[ -n "$KARMADA_KUBECONFIG" ]]; then
-        export KUBECONFIG="$KARMADA_KUBECONFIG"
-    fi
-else
-    print_step "4. Skipping management cluster check (kubeconfig not provided)"
+print_status "Checking StatefulMigration resource on mgmt-cluster..."
+kubectl get statefulmigration inmem-go-migration -n inmem-go-app >/dev/null 2>&1 && \
+    print_success "StatefulMigration CR found on mgmt-cluster" || \
+    print_warning "StatefulMigration CR not found"
+
+# Switch back to Karmada for final status check
+if [[ -n "$KARMADA_KUBECONFIG" ]]; then
+    print_status "Switching back to Karmada for final status check"
+    export KUBECONFIG="$KARMADA_KUBECONFIG"
 fi
 
 # =====================================================
@@ -246,7 +263,7 @@ kubectl get namespace inmem-go-app -o wide 2>/dev/null || echo "Namespace not fo
 kubectl get pod inmem-go-app -n inmem-go-app -o wide 2>/dev/null || echo "Pod not found"
 kubectl get service inmem-go-service -n inmem-go-app -o wide 2>/dev/null || echo "Service not found"
 kubectl get propagationpolicy inmem-go-propagation -n inmem-go-app -o wide 2>/dev/null || echo "PropagationPolicy not found"
-kubectl get statefulmigration inmem-go-migration -n inmem-go-app -o wide 2>/dev/null || echo "StatefulMigration not found"
+kubectl get statefulmigration inmem-go-migration -n inmem-go-app -o wide 2>/dev/null || echo "StatefulMigration not found (check mgmt cluster)"
 
 echo
 echo "Propagation Status:"
@@ -273,7 +290,10 @@ echo "  6. Checkpoint creation happens every 5 minutes"
 echo
 echo "🔍 Useful verification commands:"
 echo
-echo "  # Check StatefulMigration status"
+echo "  # Check StatefulMigration status (on mgmt cluster)"
+if [[ -n "$MGMT_KUBECONFIG" ]]; then
+echo "  export KUBECONFIG=\"$MGMT_KUBECONFIG\""
+fi
 echo "  kubectl describe statefulmigration inmem-go-migration -n inmem-go-app"
 echo
 echo "  # Check if pod has migration label (added by controller)"
