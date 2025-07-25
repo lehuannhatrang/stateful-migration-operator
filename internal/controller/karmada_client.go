@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	karmadav1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -111,9 +112,26 @@ func (k *KarmadaClient) CreateOrUpdatePropagationPolicy(ctx context.Context, pol
 		return fmt.Errorf("failed to get PropagationPolicy: %w", err)
 	}
 
-	// Policy exists, update it
+	// Policy exists, update it - preserve system-managed labels and annotations
 	logger.Info("Updating PropagationPolicy", "name", policy.Name, "namespace", policy.Namespace)
+
+	// Preserve system-generated metadata
 	policy.ResourceVersion = existing.ResourceVersion
+
+	// Preserve immutable system labels that Karmada adds automatically
+	if existing.Labels != nil {
+		if policy.Labels == nil {
+			policy.Labels = make(map[string]string)
+		}
+		// Preserve any Karmada system labels (especially permanent-id)
+		for key, value := range existing.Labels {
+			if strings.HasPrefix(key, "propagationpolicy.karmada.io/") ||
+				strings.HasPrefix(key, "karmada.io/") {
+				policy.Labels[key] = value
+			}
+		}
+	}
+
 	return k.Update(ctx, policy)
 }
 
