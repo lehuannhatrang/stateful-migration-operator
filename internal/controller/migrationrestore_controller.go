@@ -23,31 +23,40 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	migrationv1 "github.com/lehuannhatrang/stateful-migration-operator/api/v1"
 )
 
-// MigrationRestoreReconciler reconciles a MigrationRestore object
+// MigrationRestoreReconciler reconciles a StatefulMigration object for restore operations
 type MigrationRestoreReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=migration.dcnlab.com,resources=migrationrestores,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=migration.dcnlab.com,resources=migrationrestores/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=migration.dcnlab.com,resources=migrationrestores/finalizers,verbs=update
+// +kubebuilder:rbac:groups=migration.dcnlab.com,resources=statefulmigrations,verbs=get;list;watch
+// +kubebuilder:rbac:groups=migration.dcnlab.com,resources=statefulmigrations/status,verbs=get
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the MigrationRestore object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
+// This controller watches StatefulMigration resources but does nothing at the moment.
 func (r *MigrationRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	// Fetch the StatefulMigration instance
+	var statefulMigration migrationv1.StatefulMigration
+	if err := r.Get(ctx, req.NamespacedName, &statefulMigration); err != nil {
+		log.Error(err, "unable to fetch StatefulMigration")
+		// we'll ignore not-found errors, since they can't be fixed by an immediate
+		// requeue (we'll need to wait for a new notification), and we can get them
+		// on deleted requests.
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	log.Info("MigrationRestore controller received StatefulMigration", "name", statefulMigration.Name, "namespace", statefulMigration.Namespace)
+
+	// TODO: Implement restore logic here when needed
+	// This controller will handle restore operations for StatefulMigration resources
+	// For now, it does nothing but log that it received the resource
 
 	return ctrl.Result{}, nil
 }
@@ -55,8 +64,7 @@ func (r *MigrationRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // SetupWithManager sets up the controller with the Manager.
 func (r *MigrationRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		// Uncomment the following line adding a pointer to an instance of the controlled resource as an argument
-		// For().
+		For(&migrationv1.StatefulMigration{}).
 		Named("migrationrestore").
 		Complete(r)
 }

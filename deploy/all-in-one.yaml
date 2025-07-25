@@ -84,19 +84,6 @@ rules:
   - get
   - patch
   - update
-# Karmada PropagationPolicy resources
-- apiGroups:
-  - policy.karmada.io
-  resources:
-  - propagationpolicies
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 # Core Kubernetes resources
 - apiGroups:
   - apps
@@ -309,6 +296,17 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        volumeMounts:
+        - name: karmada-kubeconfig
+          mountPath: /etc/karmada
+          readOnly: true
+      volumes:
+      - name: karmada-kubeconfig
+        secret:
+          secretName: karmada-kubeconfig
+          items:
+          - key: kubeconfig
+            path: kubeconfig
       terminationGracePeriodSeconds: 10
       tolerations:
       - effect: NoSchedule

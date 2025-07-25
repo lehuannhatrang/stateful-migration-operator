@@ -48,7 +48,8 @@ const (
 // MigrationBackupReconciler reconciles a StatefulMigration object
 type MigrationBackupReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	KarmadaClient *KarmadaClient
 }
 
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=statefulmigrations,verbs=get;list;watch;create;update;patch;delete
@@ -56,7 +57,6 @@ type MigrationBackupReconciler struct {
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=statefulmigrations/finalizers,verbs=update
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=checkpointbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=checkpointbackups/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=policy.karmada.io,resources=propagationpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=*,verbs=get;list;watch;update;patch
@@ -65,6 +65,24 @@ type MigrationBackupReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *MigrationBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	// Initialize Karmada client if not already done
+	if r.KarmadaClient == nil {
+		karmadaClient, err := NewKarmadaClient()
+		if err != nil {
+			log.Error(err, "Failed to initialize Karmada client")
+			// Continue without Karmada client - PropagationPolicies will be skipped
+			log.Info("Continuing without Karmada client - PropagationPolicies will be skipped")
+		} else {
+			r.KarmadaClient = karmadaClient
+			log.Info("Successfully initialized Karmada client")
+
+			// Test Karmada connection
+			if err := r.KarmadaClient.TestConnection(ctx); err != nil {
+				log.Error(err, "Failed to connect to Karmada")
+			}
+		}
+	}
 
 	// Fetch the StatefulMigration instance
 	var statefulMigration migrationv1.StatefulMigration
@@ -380,6 +398,14 @@ func (r *MigrationBackupReconciler) extractContainerInfo(pod *corev1.Pod) []migr
 
 // createOrUpdatePropagationPolicy creates or updates a Karmada PropagationPolicy for the CheckpointBackup
 func (r *MigrationBackupReconciler) createOrUpdatePropagationPolicy(ctx context.Context, backup *migrationv1.CheckpointBackup, cluster string) error {
+	log := logf.FromContext(ctx)
+
+	// Skip if Karmada client is not available
+	if r.KarmadaClient == nil {
+		log.Info("Skipping PropagationPolicy creation - Karmada client not available", "backup", backup.Name)
+		return nil
+	}
+
 	policyName := fmt.Sprintf("%s-policy", backup.Name)
 
 	policy := &karmadav1alpha1.PropagationPolicy{
@@ -403,21 +429,7 @@ func (r *MigrationBackupReconciler) createOrUpdatePropagationPolicy(ctx context.
 		},
 	}
 
-	// Set CheckpointBackup as owner
-	if err := controllerutil.SetControllerReference(backup, policy, r.Scheme); err != nil {
-		return err
-	}
-
-	var existingPolicy karmadav1alpha1.PropagationPolicy
-	if err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: backup.Namespace}, &existingPolicy); err != nil {
-		if errors.IsNotFound(err) {
-			return r.Create(ctx, policy)
-		}
-		return err
-	}
-
-	existingPolicy.Spec = policy.Spec
-	return r.Update(ctx, &existingPolicy)
+	return r.KarmadaClient.CreateOrUpdatePropagationPolicy(ctx, policy)
 }
 
 // cleanupOrphanedCheckpointBackups removes CheckpointBackup resources that no longer have corresponding pods
@@ -478,7 +490,6 @@ func (r *MigrationBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&migrationv1.StatefulMigration{}).
 		Owns(&migrationv1.CheckpointBackup{}).
-		Owns(&karmadav1alpha1.PropagationPolicy{}).
 		Named("migrationbackup").
 		Complete(r)
 }

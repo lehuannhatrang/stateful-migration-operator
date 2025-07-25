@@ -70,19 +70,6 @@ rules:
   - get
   - patch
   - update
-# Karmada PropagationPolicy resources
-- apiGroups:
-  - policy.karmada.io
-  resources:
-  - propagationpolicies
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 # Core Kubernetes resources
 - apiGroups:
   - apps
