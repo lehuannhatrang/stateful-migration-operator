@@ -23,7 +23,9 @@ import (
 
 	karmadav1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +39,7 @@ const (
 // KarmadaClient wraps a client for Karmada operations
 type KarmadaClient struct {
 	client.Client
+	restClient rest.Interface
 }
 
 // NewKarmadaClient creates a new client for Karmada operations using the mounted kubeconfig
@@ -71,10 +74,23 @@ func NewKarmadaClient() (*KarmadaClient, error) {
 		return nil, fmt.Errorf("failed to create Karmada client: %w", err)
 	}
 
+	// Create REST client for proxy requests
+	// Configure for Karmada cluster proxy API
+	restConfig := *config // Copy the config
+	restConfig.APIPath = "/apis"
+	restConfig.GroupVersion = &schema.GroupVersion{Group: "cluster.karmada.io", Version: "v1alpha1"}
+	restConfig.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+
+	restClient, err := rest.RESTClientFor(&restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Karmada REST client: %w", err)
+	}
+
 	logger.Info("Successfully created Karmada client", "endpoint", config.Host)
 
 	return &KarmadaClient{
-		Client: karmadaClient,
+		Client:     karmadaClient,
+		restClient: restClient,
 	}, nil
 }
 
@@ -122,4 +138,9 @@ func (k *KarmadaClient) TestConnection(ctx context.Context) error {
 
 	logger.Info("Successfully connected to Karmada", "policies_found", len(policies.Items))
 	return nil
+}
+
+// RESTClient returns the REST client for making proxy requests
+func (k *KarmadaClient) RESTClient() rest.Interface {
+	return k.restClient
 }

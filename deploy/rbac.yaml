@@ -89,7 +89,29 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
+# Namespaces for creating stateful-migration namespace
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+# Events for logging
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
 # Permissions to add labels to target resources
 - apiGroups:
   - apps

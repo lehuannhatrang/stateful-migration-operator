@@ -1,0 +1,135 @@
+package controller
+
+// CheckpointBackupCRDYAML contains the embedded CheckpointBackup CRD definition
+// Source: https://github.com/lehuannhatrang/stateful-migration-operator/blob/main/config/crd/bases/migration.dcnlab.com_checkpointbackups.yaml
+const CheckpointBackupCRDYAML = `---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: checkpointbackups.migration.dcnlab.com
+spec:
+  group: migration.dcnlab.com
+  names:
+    kind: CheckpointBackup
+    listKind: CheckpointBackupList
+    plural: checkpointbackups
+    singular: checkpointbackup
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: CheckpointBackup is the Schema for the checkpointbackups API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of CheckpointBackup
+            properties:
+              containers:
+                description: Containers specifies the container configurations for checkpoints
+                items:
+                  description: Container defines a container configuration for checkpoints
+                  properties:
+                    image:
+                      description: Image of the container in the registry
+                      type: string
+                    name:
+                      description: Name of the container
+                      type: string
+                  required:
+                  - image
+                  - name
+                  type: object
+                type: array
+              podRef:
+                description: PodRef specifies the pod to checkpoint
+                properties:
+                  name:
+                    description: Name of the referenced pod
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced pod
+                    type: string
+                required:
+                - name
+                type: object
+              registry:
+                description: Registry specifies the registry configuration for storing checkpoints
+                properties:
+                  repository:
+                    description: Repository path in the registry
+                    type: string
+                  secretRef:
+                    description: SecretRef contains credentials for the registry
+                    properties:
+                      name:
+                        description: Name of the referenced secret
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: URL of the registry
+                    type: string
+                required:
+                - repository
+                - url
+                type: object
+              resourceRef:
+                description: ResourceRef specifies the workload to migrate
+                properties:
+                  apiVersion:
+                    description: APIVersion of the referenced resource
+                    type: string
+                  kind:
+                    description: Kind of the referenced resource
+                    type: string
+                  name:
+                    description: Name of the referenced resource
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced resource
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+              schedule:
+                description: Schedule specifies the backup schedule in cron format
+                type: string
+            required:
+            - podRef
+            - registry
+            - resourceRef
+            - schedule
+            type: object
+          status:
+            description: status defines the observed state of CheckpointBackup
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+`
