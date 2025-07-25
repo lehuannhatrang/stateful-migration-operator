@@ -1,0 +1,9 @@
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  labels:
+    app.kubernetes.io/name: stateful-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: statefulmigration-sample
+spec:
+  # TODO(user): Add fields here

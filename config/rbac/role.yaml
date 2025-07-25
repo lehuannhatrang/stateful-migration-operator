@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups/status
+  verbs:
+  - get
+  - patch
+  - update

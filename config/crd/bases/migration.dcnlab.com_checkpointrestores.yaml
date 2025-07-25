@@ -1,0 +1,84 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: checkpointrestores.migration.dcnlab.com
+spec:
+  group: migration.dcnlab.com
+  names:
+    kind: CheckpointRestore
+    listKind: CheckpointRestoreList
+    plural: checkpointrestores
+    singular: checkpointrestore
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: CheckpointRestore is the Schema for the checkpointrestores API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of CheckpointRestore
+            properties:
+              backupRef:
+                description: BackupRef specifies the backup to restore from
+                properties:
+                  name:
+                    description: Name of the referenced backup
+                    type: string
+                required:
+                - name
+                type: object
+              containers:
+                description: Containers specifies the container configurations for
+                  restore
+                items:
+                  description: Container defines a container configuration for checkpoints
+                  properties:
+                    image:
+                      description: Image of the container in the registry
+                      type: string
+                    name:
+                      description: Name of the container
+                      type: string
+                  required:
+                  - image
+                  - name
+                  type: object
+                type: array
+              podName:
+                description: PodName specifies the name of the pod to restore
+                type: string
+            required:
+            - backupRef
+            - podName
+            type: object
+          status:
+            description: status defines the observed state of CheckpointRestore
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

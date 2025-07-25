@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- migration_v1_statefulmigration.yaml
+- migration_v1_checkpointbackup.yaml
+- migration_v1_checkpointrestore.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
