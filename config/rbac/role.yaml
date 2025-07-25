@@ -5,9 +5,40 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - '*'
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - migration.dcnlab.com
   resources:
   - checkpointbackups
+  - migrationrestores
+  - statefulmigrations
   verbs:
   - create
   - delete
@@ -20,13 +51,29 @@ rules:
   - migration.dcnlab.com
   resources:
   - checkpointbackups/finalizers
+  - migrationrestores/finalizers
+  - statefulmigrations/finalizers
   verbs:
   - update
 - apiGroups:
   - migration.dcnlab.com
   resources:
   - checkpointbackups/status
+  - migrationrestores/status
+  - statefulmigrations/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - policy.karmada.io
+  resources:
+  - propagationpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

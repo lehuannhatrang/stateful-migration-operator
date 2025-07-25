@@ -1,0 +1,69 @@
+# Simple validation test for CRDs
+# This file tests basic CRD functionality before running complex scenarios
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crd-validation-test
+---
+# Minimal Pod for testing
+apiVersion: v1
+kind: Pod
+metadata:
+  name: validation-pod
+  namespace: crd-validation-test
+  labels:
+    app: validation
+spec:
+  containers:
+  - name: test-container
+    image: alpine:latest
+    command: ["sleep", "300"]
+---
+# Minimal StatefulMigration to validate CRD
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: validation-test
+  namespace: crd-validation-test
+spec:
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: crd-validation-test
+    name: validation-pod
+  sourceClusters:
+    - validation-cluster
+  registry:
+    url: registry.example.com
+    repository: validation/test
+  schedule: "0 */12 * * *"
+---
+# This CheckpointBackup should be created automatically by the controller
+# If you see this resource after applying StatefulMigration, the controller is working!
+# apiVersion: migration.dcnlab.com/v1
+# kind: CheckpointBackup
+# metadata:
+#   name: validation-test-validation-pod-validation-cluster
+#   namespace: crd-validation-test
+#   labels:
+#     stateful-migration: validation-test
+#     target-cluster: validation-cluster
+#     target-pod: validation-pod
+# spec:
+#   schedule: "0 */12 * * *"
+#   podRef:
+#     namespace: crd-validation-test
+#     name: validation-pod
+#   resourceRef:
+#     apiVersion: v1
+#     kind: Pod
+#     namespace: crd-validation-test
+#     name: validation-pod
+#   registry:
+#     url: registry.example.com
+#     repository: validation/test
+#   containers:
+#   - name: test-container
+#     image: alpine:latest 

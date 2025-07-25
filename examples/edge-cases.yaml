@@ -1,0 +1,237 @@
+# Edge cases for testing Migration Backup Controller
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge-case-tests
+---
+# Test 1: StatefulMigration with no registry secretRef (optional field)
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: no-secret-ref
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: edge-case-tests
+    name: test-pod-no-secret
+  sourceClusters:
+    - cluster-1
+  registry:
+    url: public-registry.io
+    repository: public/checkpoints
+    # No secretRef - testing optional field
+  schedule: "0 */1 * * *"
+---
+# Pod for the above test
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-no-secret
+  namespace: edge-case-tests
+spec:
+  containers:
+  - name: simple-container
+    image: alpine:latest
+    command: ["sleep", "3600"]
+---
+# Test 2: Single source cluster
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: single-cluster
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: edge-case-tests
+    name: single-replica-deployment
+  sourceClusters:
+    - only-cluster
+  registry:
+    url: registry.example.com
+    repository: test/single
+  schedule: "*/30 * * * *"
+---
+# Single replica deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: single-replica-deployment
+  namespace: edge-case-tests
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: single-replica
+  template:
+    metadata:
+      labels:
+        app: single-replica
+    spec:
+      containers:
+      - name: single-container
+        image: nginx:alpine
+---
+# Test 3: StatefulSet with zero replicas (edge case)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zero-replica-sts
+  namespace: edge-case-tests
+spec:
+  serviceName: zero-replica
+  replicas: 0
+  selector:
+    matchLabels:
+      app: zero-replica
+  template:
+    metadata:
+      labels:
+        app: zero-replica
+    spec:
+      containers:
+      - name: container
+        image: busybox
+        command: ["sleep", "3600"]
+---
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: zero-replicas
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    namespace: edge-case-tests
+    name: zero-replica-sts
+  sourceClusters:
+    - cluster-1
+  registry:
+    url: registry.example.com
+    repository: test/zero
+  schedule: "0 */2 * * *"
+---
+# Test 4: Pod with no containers (edge case - should be invalid)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-init-only
+  namespace: edge-case-tests
+spec:
+  initContainers:
+  - name: init-container
+    image: busybox
+    command: ["echo", "init done"]
+  containers:
+  - name: main-container
+    image: alpine
+    command: ["sleep", "1"]
+---
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: init-container-pod
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: edge-case-tests
+    name: pod-with-init-only
+  sourceClusters:
+    - cluster-1
+  registry:
+    url: registry.example.com
+    repository: test/init
+  schedule: "*/45 * * * *"
+---
+# Test 5: Multiple source clusters with long names
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: long-cluster-names
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: edge-case-tests
+    name: test-pod-no-secret
+  sourceClusters:
+    - very-long-cluster-name-east-region-production
+    - very-long-cluster-name-west-region-production
+    - very-long-cluster-name-central-region-staging
+  registry:
+    url: registry.example.com
+    repository: test/long-names
+  schedule: "0 */3 * * *"
+---
+# Test 6: Deployment with many replicas
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: many-replicas
+  namespace: edge-case-tests
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: many-replicas
+  template:
+    metadata:
+      labels:
+        app: many-replicas
+    spec:
+      containers:
+      - name: web
+        image: nginx:alpine
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+---
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: many-pods
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: edge-case-tests
+    name: many-replicas
+  sourceClusters:
+    - cluster-1
+    - cluster-2
+  registry:
+    url: registry.example.com
+    repository: test/many-pods
+  schedule: "*/20 * * * *"
+---
+# Test 7: StatefulMigration referencing non-existent resource
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: non-existent-resource
+  namespace: edge-case-tests
+spec:
+  resourceRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    namespace: edge-case-tests
+    name: does-not-exist
+  sourceClusters:
+    - cluster-1
+  registry:
+    url: registry.example.com
+    repository: test/non-existent
+  schedule: "0 */4 * * *" 

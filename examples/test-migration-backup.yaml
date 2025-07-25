@@ -1,0 +1,242 @@
+# Example 1: Test with StatefulSet
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stateful-migration-test
+---
+# Registry credentials secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reg-credentials
+  namespace: stateful-migration-test
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJyZWdpc3RyeS5teWRvbWFpbi5jb20iOnsidXNlcm5hbWUiOiJ0ZXN0dXNlciIsInBhc3N3b3JkIjoidGVzdHBhc3MiLCJhdXRoIjoiZEdWemRIVnpaWEk2ZEdWemRIQmhjM009In19fQ==
+---
+# Sample StatefulSet to migrate
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: my-app
+  namespace: stateful-migration-test
+spec:
+  serviceName: my-app
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+      - name: app-container
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      - name: sidecar-container
+        image: busybox:1.35
+        command: ["sleep", "3600"]
+        volumeMounts:
+        - name: data
+          mountPath: /shared
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+---
+# StatefulMigration for StatefulSet
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: migrate-my-app
+  namespace: stateful-migration-test
+spec:
+  # The StatefulSet to migrate
+  resourceRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    namespace: stateful-migration-test
+    name: my-app
+  # Source clusters to back up from
+  sourceClusters:
+    - cluster-1
+    - cluster-2
+  registry:
+    url: registry.mydomain.com
+    repository: lehuannhatrang/checkpoints
+    secretRef:
+      name: reg-credentials
+  schedule: "0/15 * * * *" # Every 15 minutes
+
+---
+# Example 2: Test with Deployment
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: stateful-migration-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+      - name: web-container
+        image: httpd:2.4
+        ports:
+        - containerPort: 80
+      - name: log-collector
+        image: fluentd:v1.14
+        env:
+        - name: FLUENTD_CONF
+          value: "fluent.conf"
+---
+# StatefulMigration for Deployment
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: migrate-web-app
+  namespace: stateful-migration-test
+spec:
+  # The Deployment to migrate
+  resourceRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: stateful-migration-test
+    name: web-app
+  # Source clusters to back up from
+  sourceClusters:
+    - cluster-1
+  registry:
+    url: registry.mydomain.com
+    repository: lehuannhatrang/checkpoints
+    secretRef:
+      name: reg-credentials
+  schedule: "0 */2 * * *" # Every 2 hours
+
+---
+# Example 3: Test with standalone Pod
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: standalone-pod
+  namespace: stateful-migration-test
+  labels:
+    app: standalone
+spec:
+  containers:
+  - name: main-container
+    image: alpine:3.18
+    command: ["sleep", "3600"]
+  - name: helper-container
+    image: busybox:1.35
+    command: ["tail", "-f", "/dev/null"]
+---
+# StatefulMigration for standalone Pod
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: migrate-standalone-pod
+  namespace: stateful-migration-test
+spec:
+  # The Pod to migrate
+  resourceRef:
+    apiVersion: v1
+    kind: Pod
+    namespace: stateful-migration-test
+    name: standalone-pod
+  # Source clusters to back up from
+  sourceClusters:
+    - cluster-3
+  registry:
+    url: registry.mydomain.com
+    repository: lehuannhatrang/checkpoints
+    secretRef:
+      name: reg-credentials
+  schedule: "0/30 * * * *" # Every 30 minutes
+
+---
+# Example 4: Multi-cluster scenario
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: database
+  namespace: stateful-migration-test
+spec:
+  serviceName: database
+  replicas: 1
+  selector:
+    matchLabels:
+      app: database
+  template:
+    metadata:
+      labels:
+        app: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        env:
+        - name: POSTGRES_DB
+          value: "testdb"
+        - name: POSTGRES_USER
+          value: "testuser"
+        - name: POSTGRES_PASSWORD
+          value: "testpass"
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 2Gi
+---
+# StatefulMigration for multi-cluster database backup
+apiVersion: migration.dcnlab.com/v1
+kind: StatefulMigration
+metadata:
+  name: migrate-database
+  namespace: stateful-migration-test
+spec:
+  # The database StatefulSet to migrate
+  resourceRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    namespace: stateful-migration-test
+    name: database
+  # Multiple source clusters
+  sourceClusters:
+    - cluster-east
+    - cluster-west
+    - cluster-central
+  registry:
+    url: registry.mydomain.com
+    repository: lehuannhatrang/checkpoints
+    secretRef:
+      name: reg-credentials
+  schedule: "0 */6 * * *" # Every 6 hours 

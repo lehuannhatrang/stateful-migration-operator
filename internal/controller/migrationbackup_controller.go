@@ -162,7 +162,7 @@ func (r *MigrationBackupReconciler) reconcileDelete(ctx context.Context, statefu
 // addLabelToTargetResource adds the checkpoint migration label to the target resource
 func (r *MigrationBackupReconciler) addLabelToTargetResource(ctx context.Context, statefulMigration *migrationv1.StatefulMigration) error {
 	resourceRef := statefulMigration.Spec.ResourceRef
-	
+
 	switch strings.ToLower(resourceRef.Kind) {
 	case "statefulset":
 		var sts appsv1.StatefulSet
@@ -172,14 +172,14 @@ func (r *MigrationBackupReconciler) addLabelToTargetResource(ctx context.Context
 		}, &sts); err != nil {
 			return err
 		}
-		
+
 		if sts.Labels == nil {
 			sts.Labels = make(map[string]string)
 		}
 		sts.Labels[CheckpointMigrationLabel] = "true"
-		
+
 		return r.Update(ctx, &sts)
-		
+
 	case "deployment":
 		var deployment appsv1.Deployment
 		if err := r.Get(ctx, types.NamespacedName{
@@ -188,14 +188,14 @@ func (r *MigrationBackupReconciler) addLabelToTargetResource(ctx context.Context
 		}, &deployment); err != nil {
 			return err
 		}
-		
+
 		if deployment.Labels == nil {
 			deployment.Labels = make(map[string]string)
 		}
 		deployment.Labels[CheckpointMigrationLabel] = "true"
-		
+
 		return r.Update(ctx, &deployment)
-		
+
 	default:
 		return fmt.Errorf("unsupported resource kind: %s", resourceRef.Kind)
 	}
@@ -204,7 +204,7 @@ func (r *MigrationBackupReconciler) addLabelToTargetResource(ctx context.Context
 // removeLabelFromTargetResource removes the checkpoint migration label from the target resource
 func (r *MigrationBackupReconciler) removeLabelFromTargetResource(ctx context.Context, statefulMigration *migrationv1.StatefulMigration) error {
 	resourceRef := statefulMigration.Spec.ResourceRef
-	
+
 	switch strings.ToLower(resourceRef.Kind) {
 	case "statefulset":
 		var sts appsv1.StatefulSet
@@ -217,13 +217,13 @@ func (r *MigrationBackupReconciler) removeLabelFromTargetResource(ctx context.Co
 			}
 			return err
 		}
-		
+
 		if sts.Labels != nil {
 			delete(sts.Labels, CheckpointMigrationLabel)
 		}
-		
+
 		return r.Update(ctx, &sts)
-		
+
 	case "deployment":
 		var deployment appsv1.Deployment
 		if err := r.Get(ctx, types.NamespacedName{
@@ -235,13 +235,13 @@ func (r *MigrationBackupReconciler) removeLabelFromTargetResource(ctx context.Co
 			}
 			return err
 		}
-		
+
 		if deployment.Labels != nil {
 			delete(deployment.Labels, CheckpointMigrationLabel)
 		}
-		
+
 		return r.Update(ctx, &deployment)
-		
+
 	default:
 		return fmt.Errorf("unsupported resource kind: %s", resourceRef.Kind)
 	}
@@ -250,7 +250,7 @@ func (r *MigrationBackupReconciler) removeLabelFromTargetResource(ctx context.Co
 // getPodsFromResourceRef gets all pods related to the resource reference
 func (r *MigrationBackupReconciler) getPodsFromResourceRef(ctx context.Context, statefulMigration *migrationv1.StatefulMigration) ([]corev1.Pod, error) {
 	resourceRef := statefulMigration.Spec.ResourceRef
-	
+
 	switch strings.ToLower(resourceRef.Kind) {
 	case "statefulset":
 		var sts appsv1.StatefulSet
@@ -260,9 +260,9 @@ func (r *MigrationBackupReconciler) getPodsFromResourceRef(ctx context.Context, 
 		}, &sts); err != nil {
 			return nil, err
 		}
-		
+
 		return r.getPodsFromSelector(ctx, resourceRef.Namespace, sts.Spec.Selector)
-		
+
 	case "deployment":
 		var deployment appsv1.Deployment
 		if err := r.Get(ctx, types.NamespacedName{
@@ -271,9 +271,9 @@ func (r *MigrationBackupReconciler) getPodsFromResourceRef(ctx context.Context, 
 		}, &deployment); err != nil {
 			return nil, err
 		}
-		
+
 		return r.getPodsFromSelector(ctx, resourceRef.Namespace, deployment.Spec.Selector)
-		
+
 	case "pod":
 		var pod corev1.Pod
 		if err := r.Get(ctx, types.NamespacedName{
@@ -282,9 +282,9 @@ func (r *MigrationBackupReconciler) getPodsFromResourceRef(ctx context.Context, 
 		}, &pod); err != nil {
 			return nil, err
 		}
-		
+
 		return []corev1.Pod{pod}, nil
-		
+
 	default:
 		return nil, fmt.Errorf("unsupported resource kind: %s", resourceRef.Kind)
 	}
@@ -296,7 +296,7 @@ func (r *MigrationBackupReconciler) getPodsFromSelector(ctx context.Context, nam
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, &client.ListOptions{
 		Namespace:     namespace,
@@ -304,7 +304,7 @@ func (r *MigrationBackupReconciler) getPodsFromSelector(ctx context.Context, nam
 	}); err != nil {
 		return nil, err
 	}
-	
+
 	return podList.Items, nil
 }
 
@@ -312,7 +312,7 @@ func (r *MigrationBackupReconciler) getPodsFromSelector(ctx context.Context, nam
 func (r *MigrationBackupReconciler) reconcileCheckpointBackupForPod(ctx context.Context, statefulMigration *migrationv1.StatefulMigration, pod *corev1.Pod, cluster string) error {
 	// Generate CheckpointBackup name
 	backupName := fmt.Sprintf("%s-%s-%s", statefulMigration.Name, pod.Name, cluster)
-	
+
 	// Create CheckpointBackup spec
 	backup := &migrationv1.CheckpointBackup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -335,12 +335,12 @@ func (r *MigrationBackupReconciler) reconcileCheckpointBackupForPod(ctx context.
 			Containers:  r.extractContainerInfo(pod),
 		},
 	}
-	
+
 	// Set StatefulMigration as owner
 	if err := controllerutil.SetControllerReference(statefulMigration, backup, r.Scheme); err != nil {
 		return err
 	}
-	
+
 	// Create or update CheckpointBackup
 	var existingBackup migrationv1.CheckpointBackup
 	if err := r.Get(ctx, types.NamespacedName{Name: backupName, Namespace: statefulMigration.Namespace}, &existingBackup); err != nil {
@@ -359,7 +359,7 @@ func (r *MigrationBackupReconciler) reconcileCheckpointBackupForPod(ctx context.
 			return err
 		}
 	}
-	
+
 	// Create Karmada PropagationPolicy to distribute CheckpointBackup to target cluster
 	return r.createOrUpdatePropagationPolicy(ctx, backup, cluster)
 }
@@ -367,21 +367,21 @@ func (r *MigrationBackupReconciler) reconcileCheckpointBackupForPod(ctx context.
 // extractContainerInfo extracts container information from a pod
 func (r *MigrationBackupReconciler) extractContainerInfo(pod *corev1.Pod) []migrationv1.Container {
 	var containers []migrationv1.Container
-	
+
 	for _, container := range pod.Spec.Containers {
 		containers = append(containers, migrationv1.Container{
 			Name:  container.Name,
 			Image: container.Image,
 		})
 	}
-	
+
 	return containers
 }
 
 // createOrUpdatePropagationPolicy creates or updates a Karmada PropagationPolicy for the CheckpointBackup
 func (r *MigrationBackupReconciler) createOrUpdatePropagationPolicy(ctx context.Context, backup *migrationv1.CheckpointBackup, cluster string) error {
 	policyName := fmt.Sprintf("%s-policy", backup.Name)
-	
+
 	policy := &karmadav1alpha1.PropagationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      policyName,
@@ -402,12 +402,12 @@ func (r *MigrationBackupReconciler) createOrUpdatePropagationPolicy(ctx context.
 			},
 		},
 	}
-	
+
 	// Set CheckpointBackup as owner
 	if err := controllerutil.SetControllerReference(backup, policy, r.Scheme); err != nil {
 		return err
 	}
-	
+
 	var existingPolicy karmadav1alpha1.PropagationPolicy
 	if err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: backup.Namespace}, &existingPolicy); err != nil {
 		if errors.IsNotFound(err) {
@@ -415,7 +415,7 @@ func (r *MigrationBackupReconciler) createOrUpdatePropagationPolicy(ctx context.
 		}
 		return err
 	}
-	
+
 	existingPolicy.Spec = policy.Spec
 	return r.Update(ctx, &existingPolicy)
 }
@@ -432,13 +432,13 @@ func (r *MigrationBackupReconciler) cleanupOrphanedCheckpointBackups(ctx context
 	}); err != nil {
 		return err
 	}
-	
+
 	// Create a set of current pod names for quick lookup
 	currentPodNames := make(map[string]bool)
 	for _, pod := range currentPods {
 		currentPodNames[pod.Name] = true
 	}
-	
+
 	// Delete CheckpointBackup resources for pods that no longer exist
 	for _, backup := range backupList.Items {
 		podName, exists := backup.Labels["target-pod"]
@@ -448,7 +448,7 @@ func (r *MigrationBackupReconciler) cleanupOrphanedCheckpointBackups(ctx context
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -463,13 +463,13 @@ func (r *MigrationBackupReconciler) deleteAllCheckpointBackups(ctx context.Conte
 	}); err != nil {
 		return err
 	}
-	
+
 	for _, backup := range backupList.Items {
 		if err := r.Delete(ctx, &backup); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	}
-	
+
 	return nil
 }
 

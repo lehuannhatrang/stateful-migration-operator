@@ -1,0 +1,44 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: migration-backup-controller-metrics
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: metrics
+    control-plane: migration-backup-controller
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 8080
+    protocol: TCP
+    targetPort: metrics
+  - name: health
+    port: 8081
+    protocol: TCP
+    targetPort: health
+  selector:
+    app.kubernetes.io/name: migration-backup-controller
+    control-plane: migration-backup-controller
+---
+# Optional: ServiceMonitor for Prometheus monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: migration-backup-controller-metrics
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: monitoring
+spec:
+  endpoints:
+  - path: /metrics
+    port: metrics
+    interval: 30s
+    scrapeTimeout: 10s
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: migration-backup-controller
+      app.kubernetes.io/component: metrics 

@@ -1,0 +1,346 @@
+# All-in-one deployment for Migration Backup Controller
+# Deploy to mgmt-cluster in stateful-migration namespace
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stateful-migration
+  labels:
+    app.kubernetes.io/name: stateful-migration-operator
+    app.kubernetes.io/component: namespace
+    control-plane: migration-backup-controller
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: migration-backup-controller
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: migration-backup-controller-role
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: rbac
+rules:
+# StatefulMigration resources
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - statefulmigrations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - statefulmigrations/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - statefulmigrations/status
+  verbs:
+  - get
+  - patch
+  - update
+# CheckpointBackup resources
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups/status
+  verbs:
+  - get
+  - patch
+  - update
+# Karmada PropagationPolicy resources
+- apiGroups:
+  - policy.karmada.io
+  resources:
+  - propagationpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+# Core Kubernetes resources
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+# Events for logging
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+# Leader election
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - update
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: migration-backup-controller-rolebinding
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: migration-backup-controller-role
+subjects:
+- kind: ServiceAccount
+  name: migration-backup-controller
+  namespace: stateful-migration
+
+---
+# Leader election role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: migration-backup-leader-election-role
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: migration-backup-leader-election-rolebinding
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: migration-backup-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: migration-backup-controller
+  namespace: stateful-migration
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: migration-backup-controller
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: controller
+    control-plane: migration-backup-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: migration-backup-controller
+      control-plane: migration-backup-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: migration-backup-controller
+        control-plane: migration-backup-controller
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+    spec:
+      serviceAccountName: migration-backup-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+      - name: manager
+        # Replace with your actual Docker Hub image
+        image: YOUR_DOCKERHUB_USERNAME/stateful-migration-operator:latest
+        imagePullPolicy: Always
+        command:
+        - /manager
+        args:
+        - --leader-elect
+        - --metrics-bind-address=0.0.0.0:8080
+        - --health-probe-bind-address=0.0.0.0:8081
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 1
+          failureThreshold: 3
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      terminationGracePeriodSeconds: 10
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+        operator: Exists
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/control-plane
+        operator: Exists
+      nodeSelector:
+        kubernetes.io/os: linux
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: migration-backup-controller-metrics
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: migration-backup-controller
+    app.kubernetes.io/component: metrics
+    control-plane: migration-backup-controller
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 8080
+    protocol: TCP
+    targetPort: metrics
+  - name: health
+    port: 8081
+    protocol: TCP
+    targetPort: health
+  selector:
+    app.kubernetes.io/name: migration-backup-controller
+    control-plane: migration-backup-controller 
