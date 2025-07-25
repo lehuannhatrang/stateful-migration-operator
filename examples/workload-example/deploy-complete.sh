@@ -172,7 +172,7 @@ print_step "3. Deploying StatefulMigration CR"
 
 # Create StatefulMigration with correct registry info
 cat <<EOF | kubectl apply -f -
-apiVersion: migration.dcn.io/v1
+apiVersion: migration.dcnlab.com/v1
 kind: StatefulMigration
 metadata:
   name: inmem-go-migration

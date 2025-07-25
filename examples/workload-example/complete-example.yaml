@@ -144,7 +144,7 @@ data:
 # =====================================================
 
 ---
-apiVersion: migration.dcn.io/v1
+apiVersion: migration.dcnlab.com/v1
 kind: StatefulMigration
 metadata:
   name: inmem-go-migration

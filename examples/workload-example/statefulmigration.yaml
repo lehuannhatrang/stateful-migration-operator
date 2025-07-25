@@ -13,7 +13,7 @@ data:
   username: bGVodWFubmhhdHJhbmc=  # lehuannhatrang (example)
   password: eW91ci1kb2NrZXItcGFzc3dvcmQ=  # your-docker-password (example)
 ---
-apiVersion: migration.dcn.io/v1
+apiVersion: migration.dcnlab.com/v1
 kind: StatefulMigration
 metadata:
   name: inmem-go-migration

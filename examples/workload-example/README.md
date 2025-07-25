@@ -298,7 +298,7 @@ When you deploy the `StatefulMigration` CR, here's what happens:
 
 ### **StatefulMigration CR Structure**
 ```yaml
-apiVersion: migration.dcn.io/v1
+apiVersion: migration.dcnlab.com/v1
 kind: StatefulMigration
 metadata:
   name: inmem-go-migration
