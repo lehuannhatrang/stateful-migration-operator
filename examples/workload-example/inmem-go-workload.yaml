@@ -1,0 +1,73 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inmem-go-app
+  labels:
+    app.kubernetes.io/name: inmem-go
+    environment: demo
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inmem-go-app
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    version: v1
+    component: server
+spec:
+  containers:
+    - name: inmem-go-server
+      image: lehuannhatrang/inmem-go-server:v1
+      ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+      env:
+        - name: PORT
+          value: "8080"
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "50m"
+        limits:
+          memory: "128Mi"
+          cpu: "100m"
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+  restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inmem-go-service
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    component: service
+spec:
+  type: NodePort
+  selector:
+    app: inmem-go
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+      nodePort: 30180
+  sessionAffinity: None 

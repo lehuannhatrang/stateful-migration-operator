@@ -1,0 +1,56 @@
+---
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: inmem-go-propagation
+  namespace: inmem-go-app
+  labels:
+    app: inmem-go
+    policy-type: workload-propagation
+spec:
+  # Resource selectors - specify which resources to propagate
+  resourceSelectors:
+    - apiVersion: v1
+      kind: Namespace
+      name: inmem-go-app
+    - apiVersion: v1
+      kind: Pod
+      namespace: inmem-go-app
+      name: inmem-go-app
+    - apiVersion: v1
+      kind: Service
+      namespace: inmem-go-app
+      name: inmem-go-service
+  
+  # Placement - specify target clusters
+  placement:
+    clusterAffinity:
+      clusterNames:
+        - cluster-criu
+    
+    # Optional: You can also use cluster tolerations or spread constraints
+    # clusterTolerations:
+    #   - key: "node-role.kubernetes.io/edge"
+    #     operator: Equal
+    #     value: "true"
+    #     effect: NoSchedule
+    
+    # spreadConstraints:
+    #   - maxSkew: 1
+    #     topologyKey: cluster
+    #     whenUnsatisfiable: DoNotSchedule
+  
+  # Optional: Resource propagation configurations
+  # propagateDeps: true  # Propagate dependent resources automatically
+  # schedulerName: default-scheduler  # Custom scheduler
+  
+  # Optional: Override policies for specific clusters
+  # overridePolicy: 
+  #   - clusterName: cluster-criu
+  #     overriders:
+  #       plaintextOverriders:
+  #         - path: "/spec/containers/0/env"
+  #           operator: add
+  #           value:
+  #             - name: CLUSTER_NAME
+  #               value: cluster-criu 

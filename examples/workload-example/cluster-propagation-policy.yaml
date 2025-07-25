@@ -1,0 +1,56 @@
+---
+# Alternative: ClusterPropagationPolicy for cluster-wide propagation
+# This is useful when you want to propagate resources across multiple namespaces
+apiVersion: policy.karmada.io/v1alpha1
+kind: ClusterPropagationPolicy
+metadata:
+  name: inmem-go-cluster-propagation
+  labels:
+    app: inmem-go
+    policy-type: cluster-workload-propagation
+spec:
+  # Resource selectors - specify which resources to propagate
+  resourceSelectors:
+    - apiVersion: v1
+      kind: Namespace
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: inmem-go
+    - apiVersion: v1
+      kind: Pod
+      labelSelector:
+        matchLabels:
+          app: inmem-go
+    - apiVersion: v1
+      kind: Service
+      labelSelector:
+        matchLabels:
+          app: inmem-go
+  
+  # Placement - specify target clusters
+  placement:
+    clusterAffinity:
+      clusterNames:
+        - cluster-criu
+  
+  # Propagate dependencies automatically
+  propagateDeps: true
+  
+  # Optional: Failover configuration
+  # failover:
+  #   application:
+  #     decisionConditions:
+  #       tolerationSeconds: 300
+  #       gracePeriodSeconds: 600
+  #     purgeMode: Immediately
+  
+  # Optional: Override for cluster-specific customizations
+  # overridePolicy: 
+  #   - clusterName: cluster-criu
+  #     overriders:
+  #       plaintextOverriders:
+  #         - path: "/metadata/labels"
+  #           operator: add
+  #           value:
+  #             cluster: cluster-criu
+  #             deployed-by: karmada 
