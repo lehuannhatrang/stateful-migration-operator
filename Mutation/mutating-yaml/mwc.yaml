@@ -1,0 +1,48 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: checkpoint-restore-webhook
+rules:
+- apiGroups: ["migration.dcnlab.com"]   # 실제 CRD 그룹으로!
+  resources: ["checkpointrestores"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]  # optional
+  resources: ["pods"]
+  verbs: ["get","list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: checkpoint-restore-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: checkpoint-restore-webhook
+subjects:
+- kind: ServiceAccount
+  name: checkpoint-restore-webhook
+  namespace: stateful-migration
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: checkpoint-restore-webhook
+webhooks:
+- name: image-mutate.checkpoint-restore.k8s
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  timeoutSeconds: 5
+  failurePolicy: Ignore     # 초기엔 Ignore로; 안정화 후 Fail 권장
+  clientConfig:
+    service:
+      name: checkpoint-restore-webhook-svc
+      namespace: stateful-migration
+      path: /mutate
+      port: 443
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUZDekNDQXZPZ0F3SUJBZ0lVVGw1SFdsVHZKUXN6RjFSclJ6c1JXQUFlUHhZd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0ZURVRNQkVHQTFVRUF3d0tkMlZpYUc5dmF5MWpZVEFlRncweU5UQTVNamt4TVRVMk1UUmFGdzB6TlRBNQpNamN4TVRVMk1UUmFNQlV4RXpBUkJnTlZCQU1NQ25kbFltaHZiMnN0WTJFd2dnSWlNQTBHQ1NxR1NJYjNEUUVCCkFRVUFBNElDRHdBd2dnSUtBb0lDQVFDUXUwWXVtZGkvdWVNY3ptdVNJWmluKzVyWmFPTmJweGF0UzhiQnRESEYKdlJUMm4vTGErT3p4Z2Q4N3BWTVcra2VlcFJvM25SWnpiWVh1b3Z2Y2syM2ZjTDNVMUhQY21uOG9naG9aQ1AxOQptYlBZZjh3M291TVBBc0dFZVBrKzBzR2xJS1dyNzFxR2lBL3lPTktIRFd5VmgwMFUySTZGMGRqNVl6YmJ0aXpOCnlVcnVMbGtlWXNKSmJEMkluc0tUSkdFMU1GSnlpcGhpZ0taK3N6WCtPL2lCMWUxZzJpSlVWOG90c1ZaSVpWb2cKWDBPK3gybk5wRExVOHBTZUZvbEpZYzNKVmFiU2g5RlYrd3c5VkhVekxoazUrYWhZZjcrTFdSU0svVUxwZTRoWApoMFo3NElZMHQyYWhEaUpqVWlKUlR2bDJEZDFHY2pZTHBPZ2RPMVE3NVo5YnFjakI3YWxlbzhwaUZNS0JQOWVHCkNnZkJYVWVPZkpDM1BRdFdsUDB5bUx0am9HdDcvZkUxVWwxaDd1UWd1NWtBbUJRcW9lV3VWbk0yeVB1ZzN6bXgKbVk5Y0R4QnFsUjl4Vkw0bHE5VUV1UytYMTRYci96b2VSYW9CakNTYnU1dHVSR3I5N0tGU1V2eHJCWmVsNXdCWgpGcEVRVnloTzBIdlJMbTRRQXVXaE1IQlpETUZTUGtBSGYzOWhqVVhDL2h4eko2VjN0OTA2Z0xCUmk1WHZucW5vCktoRmtCLzArYjNlT0VBeGlqT2NxcXVHazBFMTltcW1lbTlBTXZ4VFU2NG1mZUo5UEFMUCtFcmpNMU1FdXEzdncKeWJsWSsvRWI3d2tuSkp0YkIySXlERTcrRHdWUzh2T3Uxa0R5aWN5Z3ptU3UvazF6YVZnNEpmcGpWdXZNTFhieQpQd0lEQVFBQm8xTXdVVEFkQmdOVkhRNEVGZ1FVYlozUmp3ZzZzUUNMV0UwRkViZ1dET0hIbXFNd0h3WURWUjBqCkJCZ3dGb0FVYlozUmp3ZzZzUUNMV0UwRkViZ1dET0hIbXFNd0R3WURWUjBUQVFIL0JBVXdBd0VCL3pBTkJna3EKaGtpRzl3MEJBUXNGQUFPQ0FnRUFnQ3d1M0U5RlJvejZ4MVJLcWI0dUc1UU9Fek1obE91bTN3TlUrdGllUlJwWAo1QXc1OUtpeUFVNktHTlJENjBxQ1o3SDNTYWhRcmExNVNMR1IvZmljZCtBRlpzNFZqNTEzVEZ0L1ZrMUsxdi9kCk1ZRERsYkxkZ0NoNit2d1lwc1VwbTBwaXdxR3JreWxiNEFjYWYwOG5hNzNnNlU0VVM0K0RETDlWamdiMTg3R1QKU25GaEtzdmpod1Y5Q3FDOTVIcjIxWG50R2wxcnFQZlpxT0p6QzRQODlPcU1EV0xUWlAzTGdKeHBiQmlrcUs0MQpSaVNDMTVkQUF3WlBQSUhqVzJjU2tTb1RoaUNOWE1HZmtFaVl0WXNKSVQybnVTL1JneHlnL3oveTYwL1AvaFlXCnhCYnk0QTROMDNqZTE5cmtMd29EYzdUa3dtbElyeXZVcFVsTStoUmtPYVQ0SnFPUGdwU1dHUVVKQ09rLzdiZlkKRjJPNDdORitLSVBVWVBRTzNMT1Q2NXBzN0RWVXd1V3drMUFqV004SWVLZlA2QzFVZUNRNmVweGViQ0NjL2ZzTQppdFovVmZNTkRzVUlzak9POXM1WVpnanJCanprN1lTU05YMC9uYWpRMWZiMFVnb3lkVkxnZHBoNFhQVTAvTlAxCmRZVHFWUWdVM3IyTUc4TmtEQzE5MGp5MStVTEtrME13RG1EcVJQaFJBV3J5bEZNZ0Y2b2ZETlU5R3pRQjNyczEKcWUxSEdxbHVwZWJOQ2lCZGVyK00rbGhZM1JiOGlvQWtSeExnZy9rc1lvemxGS2VocldGK3JYZVV6d0VFNW1FZQpwZ3h5N0Y3R2ZZT1ZTUyt6cmRjWkhZU1dudXFWNk8yTGRjL3RVclI3dlUvSy9mNm5jbjEvWE1ETUNiM3JxQm89Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  matchPolicy: Equivalent

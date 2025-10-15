@@ -1,0 +1,24 @@
+# (A) Namespaced 리소스 전파: Namespace/Secret/Service/SA/Deployment
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: checkpoint-restore-webhook-ns
+  namespace: stateful-migration
+spec:
+  resourceSelectors:
+  - apiVersion: v1
+    kind: Secret
+    name: checkpoint-restore-webhook-tls
+  - apiVersion: v1
+    kind: Service
+    name: checkpoint-restore-webhook-svc
+  - apiVersion: v1
+    kind: ServiceAccount
+    name: checkpoint-restore-webhook
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: checkpoint-restore-webhook
+  placement:
+    clusterAffinity:
+      clusterNames:
+        - member2

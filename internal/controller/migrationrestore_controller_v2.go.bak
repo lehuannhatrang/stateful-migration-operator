@@ -1,19 +1,3 @@
-/*
-Copyright 2025 Le huan and Jeong SeungJun
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
@@ -21,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"math/rand"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,14 +23,9 @@ import (
 
 const (
 	// 폴링 주기
-	RestoreCheckInterval = 5 * time.Second
+	RestoreCheckInterval = 30 * time.Second
 	// 라벨 키: SM 단위 전파정책/Restore 매칭
 	LabelKeySM = "migration.dcnlab.com/sm"
-
-	// ✅ 추가: MigrationRestore 진행 상태 어노테이션 키
-        AnnoRestorePhase     = "migration.dcnlab.com/restore-phase"         // working|succeeded|failed
-        AnnoRestoreStartedAt = "migration.dcnlab.com/restore-started-at"    // RFC3339
-        RestoreSoftTimeout   = 20 * time.Minute
 )
 
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=statefulmigrations,verbs=get;list;watch
@@ -72,99 +50,76 @@ func (r *MigrationRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 func (r *MigrationRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		lg := ctrl.Log.WithName("rb-poller")
-		rand.Seed(time.Now().UnixNano())
+		ticker := time.NewTicker(RestoreCheckInterval)
+		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
-			default:
-			}
-			if r.KarmadaClient == nil {
-				lg.V(4).Info("Karmada client not ready")
-				// wait with jitter
-				if !sleepWithJitterCtx(ctx, RestoreCheckInterval, 0.2) {
-                    return nil
-                }
-				continue
-			}
-
-			// 1) Karmada에서 RB 전수 조사
-			rbList := &unstructured.UnstructuredList{}
-			rbList.SetGroupVersionKind(apischema.GroupVersionKind{
-				Group:   "work.karmada.io",
-				Version: "v1alpha2",
-				Kind:    "ResourceBindingList",
-			})
-
-			if err := r.KarmadaClient.List(ctx, rbList); err != nil {
-				lg.Error(err, "list ResourceBindings failed")
-                // 에러 시에도 잠깐 쉬어 백투백 오류/스핀 방지
-                if !sleepWithJitterCtx(ctx, RestoreCheckInterval, 0.2) {
-                    return nil
-				}
-				continue				
-			}
-
-			for i := range rbList.Items {
-				rb := &rbList.Items[i]
-				if !isRBSuspendedU(rb) {
+			case <-ticker.C:
+				if r.KarmadaClient == nil {
+					lg.V(4).Info("Karmada client not ready")
 					continue
 				}
-				// StatefulSet만 대상으로
-				kind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
-				if !strings.EqualFold(kind, "StatefulSet") {
-					continue
-				}
-                // ✅ 완료/실패 RB는 빠르게 스킵하여 불필요한 처리 방지
-                if phase := getRBAnnotation(rb, AnnoRestorePhase); phase == "succeeded" || phase == "failed" {
-                    continue
-                }
 
-				// 2) 원본 Ref
-				resNS, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "namespace")
-				resName, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "name")
-				resAPIV, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "apiVersion")
-				resKind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
-
-				// 3) 관리 클러스터에서 관련 SM 탐색
-				smList := &unstructured.UnstructuredList{}
-				smList.SetGroupVersionKind(apischema.GroupVersionKind{
-					Group:   "migration.dcnlab.com",
-					Version: "v1",
-					Kind:    "StatefulMigrationList",
+				// 1) Karmada에서 RB 전수 조사
+				rbList := &unstructured.UnstructuredList{}
+				rbList.SetGroupVersionKind(apischema.GroupVersionKind{
+					Group:   "work.karmada.io",
+					Version: "v1alpha2",
+					Kind:    "ResourceBindingList",
 				})
-				if err := r.Client.List(ctx, smList, &client.ListOptions{Namespace: resNS}); err != nil {
-					lg.Error(err, "list StatefulMigrations failed", "ns", resNS)
+
+				if err := r.KarmadaClient.List(ctx, rbList); err != nil {
+					lg.Error(err, "list ResourceBindings failed")
 					continue
 				}
 
-				// --- 여기부터: 여러 SM이 매칭되면 첫 개만 처리 ---
-				matched := []*unstructured.Unstructured{}
-				for j := range smList.Items {
+				for i := range rbList.Items {
+					rb := &rbList.Items[i]
+					if !isRBSuspendedU(rb) {
+						continue
+					}
+					// StatefulSet만 대상으로
+					kind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
+					if !strings.EqualFold(kind, "StatefulSet") {
+						continue
+					}
+
+					// 2) 원본 Ref
+					resNS, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "namespace")
+					resName, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "name")
+					resAPIV, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "apiVersion")
+					resKind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
+
+					// 3) 관리 클러스터에서 관련 SM 탐색
+					smList := &unstructured.UnstructuredList{}
+					smList.SetGroupVersionKind(apischema.GroupVersionKind{
+						Group:   "migration.dcnlab.com",
+						Version: "v1",
+						Kind:    "StatefulMigrationList",
+					})
+					if err := r.Client.List(ctx, smList, &client.ListOptions{Namespace: resNS}); err != nil {
+						lg.Error(err, "list StatefulMigrations failed", "ns", resNS)
+						continue
+					}
+
+					for j := range smList.Items {
 						sm := &smList.Items[j]
 						refNS, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "namespace")
 						refName, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "name")
 						refAPIV, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "apiVersion")
 						refKind, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "kind")
+
 						if refNS == resNS && refName == resName && strings.EqualFold(refKind, resKind) && refAPIV == resAPIV {
-						matched = append(matched, sm)
+							if err := r.handleSuspendedRBForSM(ctx, rb, sm); err != nil {
+								lg.Error(err, "handleSuspendedRBForSM failed", "rb", namespacedNameU(rb), "sm", namespacedNameU(sm))
+							}
 						}
-				}
-				if len(matched) == 0 {
-						continue
-				}
-				if len(matched) > 1 {
-						lg.Info("Multiple StatefulMigrations matched; taking the first", "count", len(matched))
-				}
-				if err := r.handleSuspendedRBForSM(ctx, rb, matched[0]); err != nil {
-						lg.Error(err, "handleSuspendedRBForSM failed", "rb", namespacedNameU(rb), "sm", namespacedNameU(matched[0]))
+					}
 				}
 			}
-            // ✅ 라운드 종료 후 지터 슬립(핵심)
-            if !sleepWithJitterCtx(ctx, RestoreCheckInterval, 0.2) {
-                return nil
-            }			
 		}
 	}))
 }
@@ -176,24 +131,11 @@ func (r *MigrationRestoreReconciler) handleSuspendedRBForSM(ctx context.Context,
 		return fmt.Errorf("Karmada client not initialized")
 	}
 
-        // 이미 완료된 경우는 빠르게 종료
-        if getRBAnnotation(rb, AnnoRestorePhase) == "succeeded" {
-                return nil
-        }
-        // RB 타깃 클러스터 목록
-        rbClusters, err := getRBClusterNamesU(rb)
-        if err != nil {
-        return fmt.Errorf("parse RB clusters: %w", err)
-        }
-        // 진행 표식: 처음 진입 시에만 working + 시작시각 기록
-        curr := getRBAnnotation(rb, AnnoRestorePhase)
-        if curr != "working" && curr != "succeeded" && curr != "failed" {
-                _ = r.patchRBAnnotationsU(ctx, rb, map[string]string{
-                AnnoRestorePhase:     "working",
-                AnnoRestoreStartedAt: time.Now().UTC().Format(time.RFC3339),
-                })
-        }
-
+	// RB 타깃 클러스터 목록
+	rbClusters, err := getRBClusterNamesU(rb)
+	if err != nil {
+		return fmt.Errorf("parse RB clusters: %w", err)
+	}
 	// SM의 SourceClusters
 	srcClusters, _, _ := nestedStringSlice(sm.Object, "spec", "sourceClusters")
 	targetClusters := diffClusters(rbClusters, srcClusters)
@@ -246,25 +188,14 @@ func (r *MigrationRestoreReconciler) handleSuspendedRBForSM(ctx context.Context,
 			lg.Info("Restore not bound yet", "restore", restore.GetName(), "wantClusters", targetClusters)
 		}
 	}
-	if readyAll {
-		if getRBAnnotation(rb, AnnoRestorePhase) != "succeeded" {
-			if err := r.patchRBAnnotationsU(ctx, rb, map[string]string{AnnoRestorePhase: "succeeded"}); err != nil {
-				return fmt.Errorf("annotate RB succeeded: %w", err)
-			}
-			lg.Info("Marked restore succeeded on RB annotation", "rb", namespacedNameU(rb))
-		}
-	}
-        // 아직 모두 준비되지 않았다면 soft-timeout 감시(로그 또는 실패 어노테이션)
-        if !readyAll {
-                if started := getRBAnnotation(rb, AnnoRestoreStartedAt); started != "" {
-                if t, err := time.Parse(time.RFC3339, started); err == nil && time.Since(t) > RestoreSoftTimeout {
-                        lg.Info("Restore soft-timeout reached; still working", "rb", namespacedNameU(rb))
-                        // 필요 시 실패 표식까지 남기려면 아래 주석 해제
-                        // _ = r.patchRBAnnotationsU(ctx, rb, map[string]string{AnnoRestorePhase: "failed"})
-                }
-                }
-        }
 
+	// 5) 모두 바인딩 → 원본 RB unsuspend
+	if readyAll {
+		if err := r.unsuspendRB_U(ctx, rb); err != nil {
+			return fmt.Errorf("unsuspend RB: %w", err)
+		}
+		lg.Info("Original RB unsuspended (Dispatching=false)", "rb", namespacedNameU(rb))
+	}
 	return nil
 }
 
@@ -447,19 +378,7 @@ func (r *MigrationRestoreReconciler) isRestoreBoundU(ctx context.Context, restor
 	return false, nil
 }
 
-/* ------------------------------ 유틸 ------------------------------ */
-
-func isRBSuspendedU(rb *unstructured.Unstructured) bool {
-	disp, found, _ := unstructured.NestedBool(rb.Object, "spec", "suspension", "suspension", "dispatching")
-	if !found {
-		disp2, _, _ := unstructured.NestedBool(rb.Object, "spec", "suspension", "dispatching")
-		return disp2
-	}
-	return disp
-}
-
-// ✅ 추가: RB 어노테이션 patch 유틸 (KarmadaClient 사용)
-func (r *MigrationRestoreReconciler) patchRBAnnotationsU(ctx context.Context, rb *unstructured.Unstructured, adds map[string]string) error {
+func (r *MigrationRestoreReconciler) unsuspendRB_U(ctx context.Context, rb *unstructured.Unstructured) error {
 	if r.KarmadaClient == nil {
 		return fmt.Errorf("Karmada client not initialized")
 	}
@@ -470,23 +389,22 @@ func (r *MigrationRestoreReconciler) patchRBAnnotationsU(ctx context.Context, rb
 		if err := r.KarmadaClient.Get(ctx, key, fresh); err != nil {
 			return err
 		}
-		ann := fresh.GetAnnotations()
-		if ann == nil {
-			ann = map[string]string{}
-		}
-		changed := false
-		for k, v := range adds {
-			if ann[k] != v {
-				ann[k] = v
-				changed = true
-			}
-		}
-		if !changed {
-			return nil
-		}
-		fresh.SetAnnotations(ann)
+		// ✅ 호환성: 두 경로 모두 false 로 설정
+		_ = unstructured.SetNestedField(fresh.Object, false, "spec", "suspension", "dispatching")
+		_ = unstructured.SetNestedField(fresh.Object, map[string]interface{}{"dispatching": false}, "spec", "suspension", "suspension")
 		return r.KarmadaClient.Update(ctx, fresh)
 	})
+}
+
+/* ------------------------------ 유틸 ------------------------------ */
+
+func isRBSuspendedU(rb *unstructured.Unstructured) bool {
+	disp, found, _ := unstructured.NestedBool(rb.Object, "spec", "suspension", "suspension", "dispatching")
+	if !found {
+		disp2, _, _ := unstructured.NestedBool(rb.Object, "spec", "suspension", "dispatching")
+		return disp2
+	}
+	return disp
 }
 
 func getRBClusterNamesU(rb *unstructured.Unstructured) ([]string, error) {
@@ -579,39 +497,4 @@ func nestedStringSlice(obj map[string]interface{}, fields ...string) ([]string, 
 
 func namespacedNameU(u *unstructured.Unstructured) string {
 	return fmt.Sprintf("%s/%s", u.GetNamespace(), u.GetName())
-}
-
-
-// 유틸 추가
-func getRBAnnotation(u *unstructured.Unstructured, key string) string {
-    if ann := u.GetAnnotations(); ann != nil {
-        return ann[key]
-    }
-    return ""
-}
-
-// withJitter returns d adjusted by ±pct (0.0~1.0)
-func withJitter(d time.Duration, pct float64) time.Duration {
-    if pct <= 0 {
-        return d
-    }
-    maxJ := int64(float64(d) * pct)
-    if maxJ <= 0 {
-        return d
-    }
-    delta := rand.Int63n(2*maxJ+1) - maxJ // [-maxJ, +maxJ]
-    return d + time.Duration(delta)
-}
-
-// sleepWithJitterCtx sleeps with jitter but stops early if ctx is done.
-func sleepWithJitterCtx(ctx context.Context, base time.Duration, pct float64) bool {
-    dur := withJitter(base, pct)
-    t := time.NewTimer(dur)
-    defer t.Stop()
-    select {
-    case <-ctx.Done():
-        return false
-    case <-t.C:
-        return true
-    }
 }

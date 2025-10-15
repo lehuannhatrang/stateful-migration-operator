@@ -1,0 +1,20 @@
+# (B) Cluster-scoped 리소스 전파: CR/CRB/MWC
+apiVersion: policy.karmada.io/v1alpha1
+kind: ClusterPropagationPolicy
+metadata:
+  name: checkpoint-restore-webhook-cluster
+spec:
+  resourceSelectors:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    name: checkpoint-restore-webhook
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: checkpoint-restore-webhook
+  - apiVersion: admissionregistration.k8s.io/v1
+    kind: MutatingWebhookConfiguration
+    name: checkpoint-restore-webhook
+  placement:
+    clusterAffinity:
+      clusterNames:
+        - member2
