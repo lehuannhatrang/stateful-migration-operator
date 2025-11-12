@@ -1,0 +1,42 @@
+# Certificate Issuer for webhook certificates
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: stateful-migration-webhook-selfsigned-issuer
+  namespace: stateful-migration
+spec:
+  selfSigned: {}
+---
+# Certificate for webhook server
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: stateful-migration-webhook-serving-cert
+  namespace: stateful-migration
+spec:
+  dnsNames:
+  - stateful-migration-webhook-service.stateful-migration.svc
+  - stateful-migration-webhook-service.stateful-migration.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: stateful-migration-webhook-selfsigned-issuer
+  secretName: stateful-migration-webhook-certs
+  subject:
+    organizations:
+    - stateful-migration-webhook
+---
+# Patch the MutatingAdmissionWebhook with the CA bundle
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: stateful-migration-webhook-ca-cert
+  namespace: stateful-migration
+  annotations:
+    cert-manager.io/inject-ca-from: stateful-migration/stateful-migration-webhook-serving-cert
+spec:
+  dnsNames:
+  - stateful-migration-webhook-ca
+  issuerRef:
+    kind: Issuer
+    name: stateful-migration-webhook-selfsigned-issuer
+  secretName: stateful-migration-webhook-ca-certs

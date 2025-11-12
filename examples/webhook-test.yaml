@@ -1,0 +1,98 @@
+# Example CheckpointBackup CR for testing the webhook
+apiVersion: migration.dcnlab.com/v1
+kind: CheckpointBackup
+metadata:
+  name: test-checkpoint-backup
+  namespace: default
+spec:
+  schedule: "immediately"
+  podRef:
+    name: test-app-pod
+    namespace: default
+  resourceRef:
+    apiVersion: batch/v1
+    kind: Job
+    name: test-migration-job
+    namespace: default
+  containers:
+  - name: app-container
+    image: nginx:1.20-checkpoint  # This will be used to patch the original image
+  - name: sidecar-container  
+    image: busybox:1.35-checkpoint
+---
+# Alternative CheckpointBackup with status.builtImages for fallback
+apiVersion: migration.dcnlab.com/v1
+kind: CheckpointBackup
+metadata:
+  name: test-checkpoint-backup-status
+  namespace: default
+spec:
+  schedule: "immediately"
+  podRef:
+    name: test-app-pod-2
+    namespace: default
+  resourceRef:
+    apiVersion: batch/v1
+    kind: CronJob  # Example with CronJob
+    name: test-migration-cronjob
+    namespace: default
+  containers: []  # Empty containers, will fallback to status
+status:
+  builtImages:
+  - containerName: web-server
+    imageName: nginx:1.21-restored
+    pushed: true
+  - containerName: worker
+    imageName: python:3.9-restored
+    pushed: true
+---
+# Test Job that should trigger the webhook
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-migration-job
+  namespace: default
+  labels:
+    test: webhook-mutation
+spec:
+  template:
+    spec:
+      containers:
+      - name: app-container
+        image: nginx:1.19  # This should be replaced by webhook
+        command: ["echo", "Testing webhook mutation"]
+      - name: sidecar-container
+        image: busybox:1.34  # This should be replaced by webhook
+        command: ["echo", "Testing sidecar mutation"]
+      restartPolicy: Never
+  backoffLimit: 1
+---
+# Test CronJob that creates Jobs matching the resourceRef pattern
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: test-migration-cronjob
+  namespace: default
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  suspend: true  # Suspended by default, enable manually for testing
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: web-server
+            image: nginx:1.18  # Should be replaced with nginx:1.21-restored
+            command: ["echo", "CronJob webhook test"]
+          - name: worker
+            image: python:3.8  # Should be replaced with python:3.9-restored
+            command: ["echo", "Worker container"]
+          restartPolicy: Never
+---
+# Namespace for testing (if needed)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: webhook-test
+  labels:
+    webhook-test: "true"

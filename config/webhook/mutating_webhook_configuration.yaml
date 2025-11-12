@@ -1,0 +1,59 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: stateful-migration-pod-mutator
+  labels:
+    app: stateful-migration-webhook
+webhooks:
+- name: stateful-migration-pod-mutator.migration.dcnlab.com
+  clientConfig:
+    service:
+      name: stateful-migration-webhook-service
+      namespace: stateful-migration
+      path: "/mutate-v1-pod"
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  admissionReviewVersions: ["v1", "v1beta1"]
+  sideEffects: None
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  matchPolicy: Equivalent
+  namespaceSelector:
+    matchExpressions:
+    - key: name
+      operator: NotIn
+      values: ["kube-system", "kube-public", "kube-node-lease", "stateful-migration"]
+---
+# Alternative configuration with less restrictive failure policy
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: stateful-migration-pod-mutator-alt
+  labels:
+    app: stateful-migration-webhook
+webhooks:
+- name: stateful-migration-pod-mutator-alt.migration.dcnlab.com
+  clientConfig:
+    service:
+      name: stateful-migration-webhook-service
+      namespace: stateful-migration
+      path: "/mutate-v1-pod"
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  admissionReviewVersions: ["v1", "v1beta1"]
+  sideEffects: None
+  failurePolicy: Ignore  # Changed to Ignore to prevent blocking pod creation
+  reinvocationPolicy: Never
+  matchPolicy: Equivalent
+  namespaceSelector:
+    matchExpressions:
+    - key: name
+      operator: NotIn
+      values: ["kube-system", "kube-public", "kube-node-lease", "stateful-migration"]
+  # No objectSelector - webhook will filter internally

@@ -1,0 +1,25 @@
+apiVersion: migration.dcnlab.com/v1
+kind: CheckpointBackup
+metadata:
+  name: example-localhost-stop-pod
+  namespace: default
+spec:
+  # Use "immediately" for one-time checkpoint
+  schedule: "immediately"
+  
+  # Set to true to delete pod after checkpointing
+  stopPod: true
+  
+  podRef:
+    name: example-pod
+    namespace: default
+  
+  resourceRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: example-deployment
+    namespace: default
+  
+  # No registry field - images will be built locally
+  # This will checkpoint all containers and then delete the pod
+  # Generated image names will be like: localhost/checkpoint-example-pod-container1:20250104-143022

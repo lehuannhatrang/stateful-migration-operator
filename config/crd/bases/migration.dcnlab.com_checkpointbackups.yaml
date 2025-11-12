@@ -69,8 +69,9 @@ spec:
                 - name
                 type: object
               registry:
-                description: Registry specifies the registry configuration for storing
-                  checkpoints
+                description: |-
+                  Registry specifies the registry configuration for storing checkpoints
+                  If not provided, images will be built locally without pushing to a registry
                 properties:
                   repository:
                     description: Repository path in the registry
@@ -116,16 +117,73 @@ spec:
                 type: object
               schedule:
                 description: Schedule specifies the backup schedule in cron format
+                  or "immediately" for one-time execution
                 type: string
+              stopPod:
+                description: |-
+                  StopPod specifies whether to delete the pod after checkpointing (default: false)
+                  When true, the pod will be deleted after successful checkpoint creation and no further schedules will be processed
+                type: boolean
             required:
             - podRef
-            - registry
             - resourceRef
             - schedule
             type: object
           status:
             description: status defines the observed state of CheckpointBackup
             properties:
+              builtImages:
+                description: BuiltImages contains the list of checkpoint images that
+                  were successfully built
+                items:
+                  description: BuiltImage represents a successfully built checkpoint
+                    image
+                  properties:
+                    buildTime:
+                      description: BuildTime is when the image was built
+                      format: date-time
+                      type: string
+                    containerName:
+                      description: ContainerName is the name of the container that
+                        was checkpointed
+                      type: string
+                    imageName:
+                      description: ImageName is the full name of the built checkpoint
+                        image
+                      type: string
+                    pushed:
+                      description: Pushed indicates whether the image was pushed to
+                        a registry
+                      type: boolean
+                  required:
+                  - containerName
+                  - imageName
+                  type: object
+                type: array
+              checkpointFiles:
+                description: CheckpointFiles contains the paths to checkpoint files
+                  that have been created
+                items:
+                  description: CheckpointFile represents a checkpoint file that has
+                    been created
+                  properties:
+                    checkpointTime:
+                      description: CheckpointTime is when the checkpoint was created
+                      format: date-time
+                      type: string
+                    containerName:
+                      description: ContainerName is the name of the container that
+                        was checkpointed
+                      type: string
+                    filePath:
+                      description: FilePath is the relative path to the checkpoint
+                        file
+                      type: string
+                  required:
+                  - containerName
+                  - filePath
+                  type: object
+                type: array
               conditions:
                 description: Conditions represent the latest available observations
                   of the CheckpointBackup's current state

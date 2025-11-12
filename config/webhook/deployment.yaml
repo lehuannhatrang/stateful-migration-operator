@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stateful-migration-webhook
+  namespace: stateful-migration
+  labels:
+    app: stateful-migration-webhook
+    control-plane: webhook-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stateful-migration-webhook
+      control-plane: webhook-server
+  template:
+    metadata:
+      labels:
+        app: stateful-migration-webhook
+        control-plane: webhook-server
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      serviceAccountName: stateful-migration-webhook
+      containers:
+      - name: webhook
+        image: docker.io/lehuannhatrang/stateful-migration-webhook:v1.0
+        imagePullPolicy: Never
+        command:
+        - /webhook
+        args:
+        - --webhook-port=9443
+        - --cert-dir=/tmp/k8s-webhook-server/serving-certs
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8080
+        - --leader-elect=false
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health-probe
+          protocol: TCP
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health-probe
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health-probe
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: cert
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: stateful-migration-webhook-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stateful-migration-webhook-service
+  namespace: stateful-migration
+  labels:
+    app: stateful-migration-webhook
+spec:
+  ports:
+  - name: webhook-server
+    port: 443
+    targetPort: webhook-server
+    protocol: TCP
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: stateful-migration-webhook
+    control-plane: webhook-server

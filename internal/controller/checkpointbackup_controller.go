@@ -47,6 +47,18 @@ const (
 	CheckpointBackupFinalizer = "checkpointbackup.migration.dcnlab.com/finalizer"
 	CheckpointBasePath        = "/var/lib/kubelet/checkpoints"
 	ServiceAccountPath        = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+	// Phase constants
+	PhaseCheckpointing       = "Checkpointing"
+	PhaseCheckpointed        = "Checkpointed"
+	PhaseImageBuilding       = "ImageBuilding"
+	PhaseImageBuilt          = "ImageBuilt"
+	PhaseImagePushing        = "ImagePushing"
+	PhaseImagePushed         = "ImagePushed"
+	PhaseCompleted           = "Completed"
+	PhaseCompletedPodDeleted = "CompletedPodDeleted"
+	PhaseCompletedWithError  = "CompletedWithError"
+	PhaseFailed              = "Failed"
 )
 
 // CheckpointResponse represents the response from kubelet checkpoint API
@@ -83,7 +95,7 @@ type RegistryClient struct {
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=checkpointbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=checkpointbackups/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=migration.dcnlab.com,resources=checkpointbackups/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=pods/checkpoint,verbs=patch;create;update;proxy
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
@@ -129,6 +141,12 @@ func (r *CheckpointBackupReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.reconcileDelete(ctx, &checkpointBackup)
 	}
 
+	// Check if pod was already deleted (when stopPod was used)
+	if checkpointBackup.Status.Phase == PhaseCompletedPodDeleted {
+		log.Info("Pod was already deleted after checkpoint, no further action needed", "backup", checkpointBackup.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// Check if the pod is on this node
 	isOnThisNode, err := r.isPodOnThisNode(ctx, &checkpointBackup)
 	if err != nil {
@@ -155,8 +173,8 @@ func (r *CheckpointBackupReconciler) initializeClients(ctx context.Context, back
 		r.KubeletClient = kubeletClient
 	}
 
-	if r.RegistryClient == nil {
-		registryClient, err := r.NewRegistryClient(ctx, backup.Spec.Registry)
+	if r.RegistryClient == nil && backup.Spec.Registry != nil {
+		registryClient, err := r.NewRegistryClient(ctx, *backup.Spec.Registry)
 		if err != nil {
 			return fmt.Errorf("failed to create registry client: %w", err)
 		}
@@ -191,7 +209,7 @@ func NewKubeletClient() (*KubeletClient, error) {
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
-		Timeout: 30 * time.Second,
+		Timeout: 300 * time.Second,
 	}
 
 	return &KubeletClient{
@@ -263,16 +281,232 @@ func (r *CheckpointBackupReconciler) isPodOnThisNode(ctx context.Context, backup
 	return pod.Spec.NodeName == r.NodeName, nil
 }
 
+// shouldStopPod returns true if the pod should be deleted after checkpointing
+func (r *CheckpointBackupReconciler) shouldStopPod(backup *migrationv1.CheckpointBackup) bool {
+	return backup.Spec.StopPod != nil && *backup.Spec.StopPod
+}
+
+// getCheckpointFilePath returns the checkpoint file path from status if it exists
+func (r *CheckpointBackupReconciler) getCheckpointFilePath(backup *migrationv1.CheckpointBackup, containerName string) (string, bool) {
+	for _, checkpointFile := range backup.Status.CheckpointFiles {
+		if checkpointFile.ContainerName == containerName {
+			return checkpointFile.FilePath, true
+		}
+	}
+	return "", false
+}
+
+// updatePhase updates the phase and message in the backup status with retry on conflict
+func (r *CheckpointBackupReconciler) updatePhase(ctx context.Context, backup *migrationv1.CheckpointBackup, phase, message string) error {
+	// Use retry logic to handle conflicts
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		// Get the latest version of the backup to avoid conflicts
+		var latestBackup migrationv1.CheckpointBackup
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      backup.Name,
+			Namespace: backup.Namespace,
+		}, &latestBackup); err != nil {
+			return fmt.Errorf("failed to get latest backup: %w", err)
+		}
+
+		// Update phase and message
+		latestBackup.Status.Phase = phase
+		latestBackup.Status.Message = message
+
+		// Update the status
+		if err := r.Status().Update(ctx, &latestBackup); err != nil {
+			if errors.IsConflict(err) && i < maxRetries-1 {
+				// Conflict detected, retry after a short delay
+				time.Sleep(time.Millisecond * 100 * time.Duration(i+1))
+				continue
+			}
+			return fmt.Errorf("failed to update backup status: %w", err)
+		}
+
+		// Update succeeded, also update the passed-in backup object to keep it in sync
+		backup.Status.Phase = phase
+		backup.Status.Message = message
+		return nil
+	}
+
+	return fmt.Errorf("failed to update backup status after %d retries", maxRetries)
+}
+
+// deleteCheckpointFile deletes a checkpoint file from disk
+func (r *CheckpointBackupReconciler) deleteCheckpointFile(checkpointPath string) error {
+	if _, err := os.Stat(checkpointPath); os.IsNotExist(err) {
+		// File doesn't exist, nothing to delete
+		return nil
+	}
+
+	if err := os.Remove(checkpointPath); err != nil {
+		return fmt.Errorf("failed to remove checkpoint file %s: %w", checkpointPath, err)
+	}
+
+	return nil
+}
+
+// recordCheckpointFile adds the checkpoint file information to the backup status with retry on conflict
+func (r *CheckpointBackupReconciler) recordCheckpointFile(ctx context.Context, backup *migrationv1.CheckpointBackup, containerName, checkpointPath string) error {
+	// Use retry logic to handle conflicts
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		// Get the latest version of the backup to avoid conflicts
+		var latestBackup migrationv1.CheckpointBackup
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      backup.Name,
+			Namespace: backup.Namespace,
+		}, &latestBackup); err != nil {
+			return fmt.Errorf("failed to get latest backup: %w", err)
+		}
+
+		// Check if this checkpoint file is already recorded (avoid duplicates)
+		alreadyRecorded := false
+		for _, checkpointFile := range latestBackup.Status.CheckpointFiles {
+			if checkpointFile.ContainerName == containerName && checkpointFile.FilePath == checkpointPath {
+				// Checkpoint file already recorded, no need to add again
+				alreadyRecorded = true
+				break
+			}
+		}
+
+		if alreadyRecorded {
+			return nil
+		}
+
+		// Add the new checkpoint file
+		now := metav1.Now()
+		newCheckpointFile := migrationv1.CheckpointFile{
+			ContainerName:  containerName,
+			FilePath:       checkpointPath,
+			CheckpointTime: &now,
+		}
+
+		latestBackup.Status.CheckpointFiles = append(latestBackup.Status.CheckpointFiles, newCheckpointFile)
+
+		// Update the status
+		if err := r.Status().Update(ctx, &latestBackup); err != nil {
+			if errors.IsConflict(err) && i < maxRetries-1 {
+				// Conflict detected, retry after a short delay
+				time.Sleep(time.Millisecond * 100 * time.Duration(i+1))
+				continue
+			}
+			return fmt.Errorf("failed to update backup status with checkpoint file: %w", err)
+		}
+
+		// Update succeeded, also update the passed-in backup object to keep it in sync
+		backup.Status.CheckpointFiles = latestBackup.Status.CheckpointFiles
+		return nil
+	}
+
+	return fmt.Errorf("failed to record checkpoint file after %d retries", maxRetries)
+}
+
+// recordBuiltImage adds the built image information to the backup status with retry on conflict
+func (r *CheckpointBackupReconciler) recordBuiltImage(ctx context.Context, backup *migrationv1.CheckpointBackup, containerName, imageName string, pushed bool) error {
+	// Use retry logic to handle conflicts
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		// Get the latest version of the backup to avoid conflicts
+		var latestBackup migrationv1.CheckpointBackup
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      backup.Name,
+			Namespace: backup.Namespace,
+		}, &latestBackup); err != nil {
+			return fmt.Errorf("failed to get latest backup: %w", err)
+		}
+
+		// Check if this image is already recorded (avoid duplicates)
+		alreadyRecorded := false
+		for _, builtImage := range latestBackup.Status.BuiltImages {
+			if builtImage.ContainerName == containerName && builtImage.ImageName == imageName {
+				// Image already recorded, no need to add again
+				alreadyRecorded = true
+				break
+			}
+		}
+
+		if alreadyRecorded {
+			return nil
+		}
+
+		// Add the new built image
+		now := metav1.Now()
+		newBuiltImage := migrationv1.BuiltImage{
+			ContainerName: containerName,
+			ImageName:     imageName,
+			BuildTime:     &now,
+			Pushed:        pushed,
+		}
+
+		latestBackup.Status.BuiltImages = append(latestBackup.Status.BuiltImages, newBuiltImage)
+
+		// Update the status
+		if err := r.Status().Update(ctx, &latestBackup); err != nil {
+			if errors.IsConflict(err) && i < maxRetries-1 {
+				// Conflict detected, retry after a short delay
+				time.Sleep(time.Millisecond * 100 * time.Duration(i+1))
+				continue
+			}
+			return fmt.Errorf("failed to update backup status with built image: %w", err)
+		}
+
+		// Update succeeded, also update the passed-in backup object to keep it in sync
+		backup.Status.BuiltImages = latestBackup.Status.BuiltImages
+		return nil
+	}
+
+	return fmt.Errorf("failed to record built image after %d retries", maxRetries)
+}
+
 // reconcileNormal handles the normal reconciliation logic
 func (r *CheckpointBackupReconciler) reconcileNormal(ctx context.Context, backup *migrationv1.CheckpointBackup) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Schedule checkpoint creation based on the schedule
 	backupKey := types.NamespacedName{
 		Name:      backup.Name,
 		Namespace: backup.Namespace,
 	}.String()
 
+	// Handle "immediately" schedule - perform checkpoint once and mark as completed
+	if backup.Spec.Schedule == "immediately" {
+		// Check if we've already started or completed processing
+		// Skip if we're in any phase (already started) or if LastCheckpointTime is set
+		if backup.Status.Phase != "" {
+			// Already processing or completed
+			if backup.Status.Phase == PhaseCompleted || backup.Status.Phase == PhaseCompletedPodDeleted {
+				log.Info("Immediate checkpoint already completed",
+					"backup", backup.Name,
+					"phase", backup.Status.Phase)
+			} else if backup.Status.Phase == PhaseFailed || backup.Status.Phase == PhaseCompletedWithError {
+				log.Info("Immediate checkpoint previously failed",
+					"backup", backup.Name,
+					"phase", backup.Status.Phase,
+					"message", backup.Status.Message)
+			} else {
+				// In progress (Checkpointing, ImageBuilding, etc.)
+				log.Info("Immediate checkpoint already in progress",
+					"backup", backup.Name,
+					"phase", backup.Status.Phase)
+			}
+			return ctrl.Result{}, nil
+		}
+
+		// No phase set yet - this is the first time, proceed with checkpoint
+		log.Info("Starting immediate checkpoint for the first time", "backup", backup.Name)
+
+		// Perform immediate checkpoint
+		if err := r.performCheckpoint(ctx, backup); err != nil {
+			log.Error(err, "Failed to perform immediate checkpoint")
+			return ctrl.Result{}, err
+		}
+
+		log.Info("Immediate checkpoint completed", "backup", backup.Name)
+		return ctrl.Result{}, nil
+	}
+
+	// Handle regular cron schedule
 	// Remove existing job if schedule changed
 	if entryID, exists := r.scheduledJobs[backupKey]; exists {
 		r.Scheduler.Remove(entryID)
@@ -333,6 +567,30 @@ func (r *CheckpointBackupReconciler) reconcileDelete(ctx context.Context, backup
 // performCheckpoint performs the actual checkpoint operation
 func (r *CheckpointBackupReconciler) performCheckpoint(ctx context.Context, backup *migrationv1.CheckpointBackup) error {
 	log := logf.FromContext(ctx)
+
+	// Check if already completed or in terminal state to avoid re-running
+	if backup.Status.Phase == PhaseCompleted ||
+		backup.Status.Phase == PhaseCompletedPodDeleted ||
+		backup.Status.Phase == PhaseCompletedWithError {
+		log.Info("Checkpoint already in terminal state, skipping",
+			"backup", backup.Name,
+			"phase", backup.Status.Phase)
+		return nil
+	}
+
+	// Check if already in progress (shouldn't happen, but defensive check)
+	if backup.Status.Phase == PhaseCheckpointing ||
+		backup.Status.Phase == PhaseCheckpointed ||
+		backup.Status.Phase == PhaseImageBuilding ||
+		backup.Status.Phase == PhaseImageBuilt ||
+		backup.Status.Phase == PhaseImagePushing ||
+		backup.Status.Phase == PhaseImagePushed {
+		log.Info("Checkpoint already in progress, skipping duplicate",
+			"backup", backup.Name,
+			"phase", backup.Status.Phase)
+		return nil
+	}
+
 	log.Info("Starting checkpoint operation", "backup", backup.Name, "pod", backup.Spec.PodRef.Name)
 
 	// Get pod to ensure it exists and is ready
@@ -349,21 +607,69 @@ func (r *CheckpointBackupReconciler) performCheckpoint(ctx context.Context, back
 		return nil
 	}
 
+	// Process containers - if none specified and no registry, checkpoint all containers in pod
+	containersToProcess := backup.Spec.Containers
+	if len(containersToProcess) == 0 && backup.Spec.Registry == nil {
+		// Auto-generate container specs for all containers in the pod
+		for _, podContainer := range pod.Spec.Containers {
+			containersToProcess = append(containersToProcess, migrationv1.Container{
+				Name:  podContainer.Name,
+				Image: "", // Will be generated in checkpointContainer
+			})
+		}
+		log.Info("No containers specified and no registry provided, checkpointing all pod containers",
+			"containerCount", len(containersToProcess))
+	}
+
 	// Process each container
-	for _, container := range backup.Spec.Containers {
+	for _, container := range containersToProcess {
 		if err := r.checkpointContainer(ctx, backup, &pod, container); err != nil {
 			log.Error(err, "Failed to checkpoint container", "container", container.Name)
 			return err
 		}
 	}
 
-	// Update status
+	// Update status: Completed
 	now := metav1.Now()
 	backup.Status.LastCheckpointTime = &now
-	backup.Status.Phase = "Completed"
-	if err := r.Status().Update(ctx, backup); err != nil {
-		log.Error(err, "Failed to update backup status")
+	if err := r.updatePhase(ctx, backup, PhaseCompleted, "All containers checkpointed successfully"); err != nil {
+		log.Error(err, "Failed to update phase to Completed")
 		return err
+	}
+
+	// Handle stopPod logic - delete the pod after successful checkpoint
+	if r.shouldStopPod(backup) {
+		log.Info("StopPod is enabled, deleting pod after checkpoint", "pod", backup.Spec.PodRef.Name)
+
+		if err := r.Delete(ctx, &pod); err != nil {
+			log.Error(err, "Failed to delete pod after checkpoint", "pod", pod.Name)
+			// Update status to reflect the error
+			if updateErr := r.updatePhase(ctx, backup, PhaseCompletedWithError,
+				fmt.Sprintf("Checkpoint completed but failed to delete pod: %v", err)); updateErr != nil {
+				log.Error(updateErr, "Failed to update backup status after pod deletion error")
+			}
+			return err
+		}
+
+		// Remove any scheduled jobs since pod is deleted and no further checkpoints are needed
+		backupKey := types.NamespacedName{
+			Name:      backup.Name,
+			Namespace: backup.Namespace,
+		}.String()
+
+		if entryID, exists := r.scheduledJobs[backupKey]; exists {
+			r.Scheduler.Remove(entryID)
+			delete(r.scheduledJobs, backupKey)
+			log.Info("Removed scheduled job after pod deletion", "backup", backup.Name)
+		}
+
+		// Update status to reflect pod deletion
+		if err := r.updatePhase(ctx, backup, PhaseCompletedPodDeleted, "Checkpoint completed and pod deleted successfully"); err != nil {
+			log.Error(err, "Failed to update backup status after pod deletion")
+			return err
+		}
+
+		log.Info("Successfully deleted pod after checkpoint", "pod", pod.Name)
 	}
 
 	log.Info("Successfully completed checkpoint operation", "backup", backup.Name)
@@ -375,10 +681,72 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 	log := logf.FromContext(ctx)
 	log.Info("Checkpointing container", "container", container.Name, "pod", pod.Name)
 
-	// Step 1: Call kubelet checkpoint API
-	checkpointPath, err := r.KubeletClient.CreateCheckpoint(backup.Spec.PodRef.Namespace, backup.Spec.PodRef.Name, container.Name)
-	if err != nil {
-		return fmt.Errorf("failed to create checkpoint via kubelet API: %w", err)
+	var checkpointPath string
+	var err error
+
+	// Check if checkpoint file already exists in status
+	if existingPath, found := r.getCheckpointFilePath(backup, container.Name); found {
+		log.Info("Checkpoint file already exists in status, skipping checkpoint creation",
+			"container", container.Name, "path", existingPath)
+		checkpointPath = existingPath
+
+		// Verify the file still exists on disk
+		fullCheckpointPath := filepath.Join(CheckpointBasePath, checkpointPath)
+		if _, err := os.Stat(fullCheckpointPath); os.IsNotExist(err) {
+			// File doesn't exist - check if we've already built an image for this container
+			// If image is already built, we don't need the checkpoint file anymore
+			imageAlreadyBuilt := false
+			for _, builtImage := range backup.Status.BuiltImages {
+				if builtImage.ContainerName == container.Name {
+					imageAlreadyBuilt = true
+					log.Info("Image already built for container, checkpoint file was cleaned up",
+						"container", container.Name,
+						"image", builtImage.ImageName)
+					break
+				}
+			}
+
+			if imageAlreadyBuilt {
+				// Image exists, checkpoint file was deleted - this is expected
+				// Just return, no need to do anything
+				log.Info("Skipping container as image already built", "container", container.Name)
+				return nil
+			} else {
+				// Image not built yet, but checkpoint file is missing - need to recreate
+				log.Info("Checkpoint file in status does not exist on disk, will recreate", "path", fullCheckpointPath)
+				checkpointPath = ""
+			}
+		} else {
+			log.Info("Checkpoint file verified on disk", "path", fullCheckpointPath)
+		}
+	}
+
+	// If checkpoint doesn't exist or file is missing, create it
+	if checkpointPath == "" {
+		// Update status: Checkpointing
+		if err := r.updatePhase(ctx, backup, PhaseCheckpointing, fmt.Sprintf("Creating checkpoint for container %s", container.Name)); err != nil {
+			log.Error(err, "Failed to update phase to Checkpointing")
+		}
+
+		// Step 1: Call kubelet checkpoint API
+		checkpointPath, err = r.KubeletClient.CreateCheckpoint(backup.Spec.PodRef.Namespace, backup.Spec.PodRef.Name, container.Name)
+		if err != nil {
+			if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); updateErr != nil {
+				log.Error(updateErr, "Failed to update phase to Failed")
+			}
+			return fmt.Errorf("failed to create checkpoint via kubelet API: %w", err)
+		}
+
+		// Record the checkpoint file in status
+		if err := r.recordCheckpointFile(ctx, backup, container.Name, checkpointPath); err != nil {
+			log.Error(err, "Failed to record checkpoint file", "container", container.Name, "path", checkpointPath)
+			// Don't fail here, just log the error
+		}
+
+		// Update status: Checkpointed
+		if err := r.updatePhase(ctx, backup, PhaseCheckpointed, fmt.Sprintf("Checkpoint created for container %s: %s", container.Name, checkpointPath)); err != nil {
+			log.Error(err, "Failed to update phase to Checkpointed")
+		}
 	}
 
 	// Step 1.5: Verify the checkpoint file exists (kubelet API should have returned the exact path)
@@ -408,23 +776,86 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 		return fmt.Errorf("could not find base image for container %s", container.Name)
 	}
 
-	// Step 3: Build checkpoint image using buildah
-	if err := r.buildCheckpointImage(checkpointPath, container.Image, baseImage, container.Name); err != nil {
+	// Step 3: Determine the image name to use
+	imageName := container.Image
+	if backup.Spec.Registry == nil || container.Image == "" {
+		// If no registry is provided or no image specified, use localhost with a generated name
+		imageName = fmt.Sprintf("localhost/checkpoint-%s-%s:%s",
+			backup.Spec.PodRef.Name,
+			container.Name,
+			time.Now().Format("20060102-150405"))
+		log.Info("Using localhost image", "image", imageName, "reason",
+			map[bool]string{true: "no registry provided", false: "no image specified"}[backup.Spec.Registry == nil])
+	}
+
+	// Update status: Building image
+	if err := r.updatePhase(ctx, backup, PhaseImageBuilding, fmt.Sprintf("Building checkpoint image for container %s", container.Name)); err != nil {
+		log.Error(err, "Failed to update phase to ImageBuilding")
+	}
+
+	// Step 4: Build checkpoint image using buildah
+	if err := r.buildCheckpointImage(checkpointPath, imageName, baseImage, container.Name); err != nil {
+		if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to build image: %v", err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update phase to Failed")
+		}
 		return fmt.Errorf("failed to build checkpoint image: %w", err)
 	}
 
-	// Step 4: Push image to registry
-	if err := r.RegistryClient.PushImage(container.Image); err != nil {
-		return fmt.Errorf("failed to push checkpoint image: %w", err)
+	// Update status: Image built
+	if err := r.updatePhase(ctx, backup, PhaseImageBuilt, fmt.Sprintf("Image built successfully for container %s: %s", container.Name, imageName)); err != nil {
+		log.Error(err, "Failed to update phase to ImageBuilt")
 	}
 
-	log.Info("Successfully checkpointed and pushed container image", "container", container.Name, "image", container.Image)
+	// Step 5: Push image to registry (only if registry is configured)
+	pushed := false
+	if backup.Spec.Registry != nil && r.RegistryClient != nil {
+		// Update status: Pushing image
+		if err := r.updatePhase(ctx, backup, PhaseImagePushing, fmt.Sprintf("Pushing image %s to registry", imageName)); err != nil {
+			log.Error(err, "Failed to update phase to ImagePushing")
+		}
+
+		if err := r.RegistryClient.PushImage(imageName); err != nil {
+			if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to push image: %v", err)); updateErr != nil {
+				log.Error(updateErr, "Failed to update phase to Failed")
+			}
+			return fmt.Errorf("failed to push checkpoint image: %w", err)
+		}
+		pushed = true
+
+		// Update status: Image pushed
+		if err := r.updatePhase(ctx, backup, PhaseImagePushed, fmt.Sprintf("Image pushed successfully: %s", imageName)); err != nil {
+			log.Error(err, "Failed to update phase to ImagePushed")
+		}
+		log.Info("Successfully checkpointed and pushed container image", "container", container.Name, "image", imageName)
+	} else {
+		log.Info("Successfully checkpointed container image locally", "container", container.Name, "image", imageName)
+	}
+
+	// Step 6: Record the built image in the backup status
+	if err := r.recordBuiltImage(ctx, backup, container.Name, imageName, pushed); err != nil {
+		log.Error(err, "Failed to record built image", "container", container.Name, "image", imageName)
+		// Don't return error here as the checkpoint was successful
+	}
+
+	// Step 7: Clean up checkpoint file after successful build and push (if configured)
+	if backup.Spec.Registry == nil || pushed {
+		// Delete checkpoint file if:
+		// - No registry (localhost only), image is built
+		// - Registry configured and image was pushed successfully
+		if err := r.deleteCheckpointFile(fullCheckpointPath); err != nil {
+			log.Error(err, "Failed to delete checkpoint file", "path", fullCheckpointPath)
+			// Don't return error here, just log it
+		} else {
+			log.Info("Deleted checkpoint file after successful completion", "path", fullCheckpointPath)
+		}
+	}
+
 	return nil
 }
 
 // CreateCheckpoint calls kubelet checkpoint API
 func (kc *KubeletClient) CreateCheckpoint(namespace, podName, containerName string) (string, error) {
-	url := fmt.Sprintf("%s/checkpoint/%s/%s/%s?timeout=60", kc.kubeletURL, namespace, podName, containerName)
+	url := fmt.Sprintf("%s/checkpoint/%s/%s/%s?timeout=300", kc.kubeletURL, namespace, podName, containerName)
 
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
@@ -608,10 +1039,18 @@ func (rc *RegistryClient) PushImage(imageName string) error {
 		return fmt.Errorf("failed to login to registry: %w", err)
 	}
 
-	// Push image
-	cmd := exec.Command("buildah", "push", imageName)
+	// Trim http:// or https:// prefix from registry URL
+	registryURL := rc.registry
+	registryURL = strings.TrimPrefix(registryURL, "http://")
+	registryURL = strings.TrimPrefix(registryURL, "https://")
+
+	// Construct destination image: <registry>/<image-name>
+	destinationImage := registryURL + "/" + imageName
+
+	// Push image: buildah push <local-image> <destination-image>
+	cmd := exec.Command("buildah", "push", imageName, destinationImage)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to push image %s: %w", imageName, err)
+		return fmt.Errorf("failed to push image %s to %s: %w", imageName, destinationImage, err)
 	}
 
 	return nil
@@ -622,10 +1061,15 @@ func (rc *RegistryClient) login(imageName string) error {
 	// Use the registry URL from the secret (not extracted from image name)
 	// For Docker Hub, this should be "docker.io" or can be empty
 
+	// Trim http:// or https:// prefix from registry URL
+	registryURL := rc.registry
+	registryURL = strings.TrimPrefix(registryURL, "http://")
+	registryURL = strings.TrimPrefix(registryURL, "https://")
+
 	// Login using buildah
-	cmd := exec.Command("buildah", "login", "-u", rc.username, "-p", rc.password, rc.registry)
+	cmd := exec.Command("buildah", "login", "-u", rc.username, "-p", rc.password, registryURL)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to login to registry %s: %w", rc.registry, err)
+		return fmt.Errorf("failed to login to registry %s: %w", registryURL, err)
 	}
 
 	return nil

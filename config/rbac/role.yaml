@@ -26,8 +26,8 @@ rules:
   - ""
   resources:
   - pods
-  - secrets
   verbs:
+  - delete
   - get
   - list
   - watch
@@ -40,6 +40,14 @@ rules:
   - patch
   - proxy
   - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:

@@ -542,7 +542,7 @@ func (r *MigrationBackupReconciler) reconcileCheckpointBackupForPod(ctx context.
 				Name:      pod.Name,
 			},
 			ResourceRef: statefulMigration.Spec.ResourceRef,
-			Registry:    statefulMigration.Spec.Registry,
+			Registry:    &statefulMigration.Spec.Registry,
 			Containers:  r.extractContainerInfo(pod, statefulMigration.Spec.Registry),
 		},
 	}

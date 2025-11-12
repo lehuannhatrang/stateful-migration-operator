@@ -1,0 +1,46 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- rbac.yaml
+- deployment.yaml
+- mutating_webhook_configuration.yaml
+
+# Namespace for all resources
+namespace: stateful-migration
+
+# Name prefix for resources
+namePrefix: ""
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/name: stateful-migration-webhook
+  app.kubernetes.io/component: webhook
+  app.kubernetes.io/part-of: stateful-migration-operator
+
+# Images to be used
+images:
+- name: stateful-migration-webhook
+  newName: stateful-migration-webhook
+  newTag: latest
+
+# ConfigMapGenerator for configuration
+# configMapGenerator:
+# - name: webhook-config
+#   literals:
+#   - webhook.port=9443
+#   - health.port=8081
+#   - metrics.port=8080
+
+# Patches
+patchesStrategicMerge:
+- patch-webhook-ca-bundle.yaml
+
+# JSON patches for webhook configuration
+patchesJson6902:
+- target:
+    group: admissionregistration.k8s.io
+    version: v1
+    kind: MutatingWebhookConfiguration
+    name: stateful-migration-pod-mutator-alt
+  path: patch-ca-bundle.yaml

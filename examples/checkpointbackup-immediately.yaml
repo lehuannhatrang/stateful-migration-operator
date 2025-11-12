@@ -1,0 +1,32 @@
+apiVersion: migration.dcnlab.com/v1
+kind: CheckpointBackup
+metadata:
+  name: example-immediate-checkpoint
+  namespace: default
+spec:
+  # Use "immediately" to perform checkpoint once
+  schedule: "immediately"
+  
+  # Optional: Set to true to delete pod after checkpointing
+  stopPod: false
+  
+  podRef:
+    name: example-pod
+    namespace: default
+  
+  resourceRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: example-deployment
+    namespace: default
+  
+  registry:
+    url: "docker.io"
+    repository: "myrepo/checkpoints"
+    secretRef:
+      name: registry-credentials
+      namespace: default
+  
+  containers:
+  - name: app-container
+    image: "myrepo/checkpoints:example-pod-app-container-checkpoint"
