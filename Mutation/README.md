@@ -1,7 +1,7 @@
 # Webhook Server and MutatingConfiguration
 - 웹 훅 서버의 예시와 MutatingWebhookConfiguration 리소스를 실습하기 위한 리포지토리입니다.
 - This repository provides an example of a webhook server and a corresponding MutatingWebhookConfiguration resource for hands-on practice.
-  - Kubernetes Version: 1.29
+  - Kubernetes Version: 1.33
   - Cluster: Kubeadm
 
 ## 사전 준비(Prerequisites)
