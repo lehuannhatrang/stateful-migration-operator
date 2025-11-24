@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"strings"
 
+	jsonpatch "gomodules.xyz/jsonpatch/v2"
+	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -90,15 +92,29 @@ func (p *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Allowed("No patches required")
 	}
 
-	// Create JSON patch response
-	patchBytes, err := json.Marshal(patches)
-	if err != nil {
-		log.Error(err, "Failed to marshal patches")
-		return admission.Errored(http.StatusInternalServerError, err)
+	// Log the patches for debugging
+	patchBytes, _ := json.Marshal(patches)
+	log.Info("Applying image patches", "patches", string(patchBytes), "patchCount", len(patches))
+
+	// Convert map patches to jsonpatch.Operation
+	var jsonPatches []jsonpatch.Operation
+	for _, patch := range patches {
+		op := jsonpatch.Operation{
+			Operation: patch["op"].(string),
+			Path:      patch["path"].(string),
+			Value:     patch["value"],
+		}
+		jsonPatches = append(jsonPatches, op)
 	}
 
-	log.Info("Applying image patches", "patches", string(patchBytes))
-	return admission.PatchResponseFromRaw(req.Object.Raw, patchBytes)
+	// Create the admission response with JSON patch
+	response := admission.Allowed("Image patched successfully")
+	response.Patches = jsonPatches
+	pt := admissionv1.PatchTypeJSONPatch
+	response.PatchType = &pt
+
+	log.Info("Webhook response created", "allowed", response.Allowed, "patchCount", len(jsonPatches))
+	return response
 }
 
 // isPodFromJob checks if the pod is created by a Job
@@ -193,24 +209,84 @@ func (p *PodMutator) generateImagePatches(ctx context.Context, pod *corev1.Pod, 
 		}
 	}
 
+	// Get registry URL if available
+	var registryURL string
+	if backup.Spec.Registry != nil && backup.Spec.Registry.URL != "" {
+		registryURL = normalizeRegistryURL(backup.Spec.Registry.URL)
+	}
+
 	// Generate patches for each container in the pod
 	for i, container := range pod.Spec.Containers {
-		if newImage, exists := imageMap[container.Name]; exists {
+		if imageFromBackup, exists := imageMap[container.Name]; exists {
+			// Apply registry URL if needed
+			finalImage := applyRegistryURL(imageFromBackup, registryURL)
+
 			log.Info("Patching container image",
 				"container", container.Name,
 				"originalImage", container.Image,
-				"newImage", newImage)
+				"backupImage", imageFromBackup,
+				"finalImage", finalImage)
 
 			patch := map[string]interface{}{
 				"op":    "replace",
 				"path":  fmt.Sprintf("/spec/containers/%d/image", i),
-				"value": newImage,
+				"value": finalImage,
 			}
 			patches = append(patches, patch)
 		}
 	}
 
 	return patches, nil
+}
+
+// normalizeRegistryURL removes http:// or https:// prefix and trailing slashes
+func normalizeRegistryURL(url string) string {
+	// Remove http:// or https:// prefix
+	url = strings.TrimPrefix(url, "http://")
+	url = strings.TrimPrefix(url, "https://")
+	// Remove trailing slashes
+	url = strings.TrimSuffix(url, "/")
+	return url
+}
+
+// applyRegistryURL prepends the registry URL to the image if it doesn't already have one
+func applyRegistryURL(image, registryURL string) string {
+	if registryURL == "" {
+		return image
+	}
+
+	// Check if the image already has a registry URL
+	// Images with registry typically have format: registry.com/repo/image:tag or ip:port/repo/image:tag
+	if hasRegistryURL(image) {
+		// Image already has registry URL, return as-is
+		return image
+	}
+
+	// Prepend registry URL
+	return registryURL + "/" + image
+}
+
+// hasRegistryURL checks if an image string already contains a registry URL
+func hasRegistryURL(image string) bool {
+	// Check for common patterns that indicate a registry URL:
+	// 1. Contains "://" (explicit protocol)
+	if strings.Contains(image, "://") {
+		return true
+	}
+
+	// 2. Starts with an IP address with port (e.g., 192.168.40.246:30080/)
+	// 3. Starts with a domain with port (e.g., registry.example.com:5000/)
+	// 4. Contains a dot before the first slash (e.g., docker.io/library/nginx)
+	parts := strings.Split(image, "/")
+	if len(parts) > 1 {
+		firstPart := parts[0]
+		// Check if first part contains a colon (port) or dot (domain/IP)
+		if strings.Contains(firstPart, ":") || strings.Contains(firstPart, ".") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // SetupPodMutator creates and configures the pod mutator webhook
