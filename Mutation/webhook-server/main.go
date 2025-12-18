@@ -5,261 +5,298 @@
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-
-// main.go
-// CheckpointRestore-aware mutating webhook server
-// - HTTPS on :8443 using /tls/tls.crt and /tls/tls.key
-// - Health endpoints: /healthz, /readyz (HTTPS)
-// - Looks up CheckpointRestore (GVR from env) and, if matched by podName or podGenerateName prefix,
-//   replaces container (and initContainer) images using spec.containers[].image (or fallback spec.image)
 
 package main
 
 import (
-        "context"
-        "encoding/json"
-        "fmt"
-        "io"
-        "net/http"
-        "os"
-        "path/filepath"
-        "strings"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 
-        admissionv1 "k8s.io/api/admission/v1"
-        corev1 "k8s.io/api/core/v1"
-        metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-        "k8s.io/apimachinery/pkg/runtime/schema"
-        "k8s.io/client-go/dynamic"
-        "k8s.io/client-go/rest"
-        "k8s.io/client-go/tools/clientcmd"
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
-        // Override via env if needed:
-        //   CHECKPOINT_RESTORE_GVR_GROUP (e.g., "migration.dcnlab.com")
-        //   CHECKPOINT_RESTORE_GVR_VERSION (e.g., "v1")
-        //   CHECKPOINT_RESTORE_GVR_RESOURCE (e.g., "checkpointrestores")
-        crGroup    = getenvDefault("CHECKPOINT_RESTORE_GVR_GROUP", "migration.dcnlab.com")
-        crVersion  = getenvDefault("CHECKPOINT_RESTORE_GVR_VERSION", "v1")
-        crResource = getenvDefault("CHECKPOINT_RESTORE_GVR_RESOURCE", "checkpointrestores")
+	// CheckpointRestore CRD (migration.dcnlab.com/v1)
+	checkpointRestoreGVR = schema.GroupVersionResource{
+		Group:    "migration.dcnlab.com",
+		Version:  "v1",
+		Resource: "checkpointrestores",
+	}
+
+	dynClient dynamic.Interface
 )
 
-func getenvDefault(k, d string) string {
-        if v := os.Getenv(k); v != "" {
-                return v
-        }
-        return d
+type jsonPatchOp struct {
+	Op    string      `json:"op"`
+	Path  string      `json:"path"`
+	Value interface{} `json:"value,omitempty"`
 }
 
 func main() {
-        // Health endpoints for probes (avoid 404 causing restarts)
-        http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-                w.WriteHeader(http.StatusOK)
-                _, _ = io.WriteString(w, "ok")
-        })
-        http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-                w.WriteHeader(http.StatusOK)
-                _, _ = io.WriteString(w, "ok")
-        })
+	var (
+		listenAddr = getenv("WEBHOOK_LISTEN_ADDR", ":8443")
+		certFile   = getenv("TLS_CERT_FILE", "/tls/tls.crt")
+		keyFile    = getenv("TLS_KEY_FILE", "/tls/tls.key")
+		kubeconfig = getenv("KUBECONFIG", "")
+	)
 
-        http.HandleFunc("/mutate", handleMutate)
+	// Optional flag override (handy for local dev)
+	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig, "Path to a kubeconfig. If empty, in-cluster config is used.")
+	flag.StringVar(&listenAddr, "listen", listenAddr, "Webhook listen address (default :8443)")
+	flag.StringVar(&certFile, "tls-cert", certFile, "TLS cert file path")
+	flag.StringVar(&keyFile, "tls-key", keyFile, "TLS key file path")
+	flag.Parse()
 
-        fmt.Println("Starting webhook server on :8443")
-        if err := http.ListenAndServeTLS(":8443", "/tls/tls.crt", "/tls/tls.key", nil); err != nil {
-                panic(err)
-        }
+	var err error
+	dynClient, err = newDynamicClient(kubeconfig)
+	if err != nil {
+		log.Fatalf("failed to create k8s client: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mutate", handleMutate)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
+	log.Printf("Starting webhook server on %s", listenAddr)
+	// ListenAndServeTLS loads cert/key from files; ensure Secret is mounted correctly.
+	if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("webhook server failed: %v", err)
+	}
 }
 
 func handleMutate(w http.ResponseWriter, r *http.Request) {
-        if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-                http.Error(w, "invalid content-type", http.StatusUnsupportedMediaType)
-                return
-        }
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		http.Error(w, "invalid content-type", http.StatusUnsupportedMediaType)
+		return
+	}
 
-        body, err := io.ReadAll(r.Body)
-        if err != nil {
-                http.Error(w, "could not read request", http.StatusBadRequest)
-                return
-        }
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "could not read request", http.StatusBadRequest)
+		return
+	}
 
-        var review admissionv1.AdmissionReview
-        if err := json.Unmarshal(body, &review); err != nil || review.Request == nil {
-                http.Error(w, "could not parse admission review", http.StatusBadRequest)
-                return
-        }
+	var review admissionv1.AdmissionReview
+	if err := json.Unmarshal(body, &review); err != nil || review.Request == nil {
+		http.Error(w, "could not parse admission review", http.StatusBadRequest)
+		return
+	}
 
-        // Only handle Pod CREATE; otherwise allow without patch
-        if review.Request.Kind.Kind != "Pod" || review.Request.Kind.Version != "v1" || review.Request.Operation != admissionv1.Create {
-                writeResponse(w, review, nil)
-                return
-        }
+	// Only handle Pod CREATE; otherwise allow without patch
+	if review.Request.Kind.Kind != "Pod" ||
+		review.Request.Kind.Version != "v1" ||
+		review.Request.Operation != admissionv1.Create {
+		writeResponse(w, review, nil)
+		return
+	}
 
-        var pod corev1.Pod
-        if err := json.Unmarshal(review.Request.Object.Raw, &pod); err != nil {
-                http.Error(w, "could not parse pod object", http.StatusBadRequest)
-                return
-        }
-        ns := review.Request.Namespace
-        fmt.Printf("💡 Pod CREATE admission: ns=%q name=%q generateName=%q containers=%d\n",
-                ns, pod.Name, pod.GenerateName, len(pod.Spec.Containers))
+	var pod corev1.Pod
+	if err := json.Unmarshal(review.Request.Object.Raw, &pod); err != nil {
+		http.Error(w, "could not parse pod object", http.StatusBadRequest)
+		return
+	}
 
-        // Kube config (in-cluster first, fall back to local for dev)
-        cfg, err := rest.InClusterConfig()
-        if err != nil {
-                kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-                cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-                if err != nil {
-                        http.Error(w, "cannot get kubeconfig", http.StatusInternalServerError)
-                        return
-                }
-        }
+	log.Printf("💡 Pod CREATE admission: ns=%q name=%q generateName=%q containers=%d",
+		pod.Namespace, pod.Name, pod.GenerateName, len(pod.Spec.Containers))
 
-        dc, err := dynamic.NewForConfig(cfg)
-        if err != nil {
-                http.Error(w, "failed to create dynamic client", http.StatusInternalServerError)
-                return
-        }
+	// 1) Find the *single* CheckpointRestore whose spec.podName == pod.Name (STRICT MATCH)
+	cr, imageMap, defaultImage, err := findRestoreForPod(r.Context(), pod.Namespace, pod.Name)
+	if err != nil {
+		// For safety: allow the request if webhook has errors (you can change to deny if desired)
+		log.Printf("❌ error while finding CheckpointRestore: %v (allowing without mutation)", err)
+		writeResponse(w, review, nil)
+		return
+	}
 
-        gvr := schema.GroupVersionResource{Group: crGroup, Version: crVersion, Resource: crResource}
-        crList, err := dc.Resource(gvr).Namespace(ns).List(context.TODO(), metav1.ListOptions{})
-        if err != nil {
-                // RBAC 403 or CRD mismatch will surface here
-                fmt.Printf("⚠️  List %s.%s/%s failed: %v\n", crResource, crGroup, crVersion, err)
-                writeResponse(w, review, nil)
-                return
-        }
+	if cr == nil {
+		log.Printf("ℹ️ No CheckpointRestore matched pod %s/%s (strict spec.podName match) → skipping mutation",
+			pod.Namespace, pod.Name)
+		writeResponse(w, review, nil)
+		return
+	}
 
-        targetName := pod.Name
-        genPrefix := pod.GenerateName // may be empty; prefix match if present
+	if len(imageMap) == 0 && defaultImage == "" {
+		log.Printf("❌ Matched CR %q but no image specified in spec.containers[] or spec.image → skipping mutation",
+			cr.GetName())
+		writeResponse(w, review, nil)
+		return
+	}
 
-        // Build container-name -> image map from matching CheckpointRestore
-        imageMap := make(map[string]string)
-        var defaultImage string
+	log.Printf("✅ Matched CR %q → images=%v default=%q", cr.GetName(), imageMap, defaultImage)
 
-        for _, it := range crList.Items {
-                spec, ok := it.Object["spec"].(map[string]interface{})
-                if !ok {
-                        continue
-                }
-                specPodName, _ := spec["podName"].(string)
-                specGenName, _ := spec["podGenerateName"].(string)
+	// 2) Build JSON patches to update pod.spec.containers[*].image
+	var patches []jsonPatchOp
 
-                nameMatch := (targetName != "" && specPodName == targetName) ||
-                        (genPrefix != "" && specGenName != "" && strings.HasPrefix(specGenName, genPrefix)) ||
-                        (genPrefix != "" && specPodName != "" && strings.HasPrefix(specPodName, genPrefix))
+	for i, c := range pod.Spec.Containers {
+		desired := ""
+		if img, ok := imageMap[c.Name]; ok && img != "" {
+			desired = img
+		} else {
+			desired = defaultImage
+		}
+		if desired == "" {
+			continue
+		}
+		if c.Image == desired {
+			continue
+		}
+		patches = append(patches, jsonPatchOp{
+			Op:    "replace",
+			Path:  fmt.Sprintf("/spec/containers/%d/image", i),
+			Value: desired,
+		})
+	}
 
-                if !nameMatch {
-                        continue
-                }
+	if len(patches) == 0 {
+		log.Printf("ℹ️ Nothing to patch for pod %s/%s (images already as desired) → allowing without patch",
+			pod.Namespace, pod.Name)
+		writeResponse(w, review, nil)
+		return
+	}
 
-                // Prefer spec.containers[]
-                if raw, ok := spec["containers"].([]interface{}); ok {
-                        for _, c := range raw {
-                                m, ok := c.(map[string]interface{})
-                                if !ok {
-                                        continue
-                                }
-                                cname, _ := m["name"].(string)
-                                cimg, _ := m["image"].(string)
-                                if cimg == "" {
-                                        continue
-                                }
-                                if cname != "" {
-                                        imageMap[cname] = cimg
-                                }
-                                if defaultImage == "" {
-                                        defaultImage = cimg
-                                }
-                        }
-                }
-                // Backward-compat: spec.image (single string)
-                if defaultImage == "" {
-                        if img, ok := spec["image"].(string); ok && img != "" {
-                                defaultImage = img
-                        }
-                }
+	patchBytes, err := json.Marshal(patches)
+	if err != nil {
+		http.Error(w, "failed to marshal patch", http.StatusInternalServerError)
+		return
+	}
 
-                fmt.Printf("✅ Matched CR %q → images=%v default=%q\n", it.GetName(), imageMap, defaultImage)
-                break
-        }
+	writeResponse(w, review, patchBytes)
+}
 
-        if len(imageMap) == 0 && defaultImage == "" {
-                fmt.Println("❌ No matching CheckpointRestore or no image specified → skipping mutation")
-                writeResponse(w, review, nil)
-                return
-        }
+// findRestoreForPod finds a CheckpointRestore CR in `namespace` such that spec.podName == podName.
+// Returns the matched CR, a containerName->image map, and a defaultImage fallback.
+func findRestoreForPod(ctx context.Context, namespace, podName string) (*unstructured.Unstructured, map[string]string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 
-        // Build JSONPatch: match by container name; fallback to defaultImage
-        var patches []map[string]interface{}
+	crList, err := dynClient.
+		Resource(checkpointRestoreGVR).
+		Namespace(namespace).
+		List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("list checkpointrestores: %w", err)
+	}
 
-        for i := range pod.Spec.Containers {
-                want := imageMap[pod.Spec.Containers[i].Name]
-                if want == "" {
-                        want = defaultImage
-                }
-                if want == "" || pod.Spec.Containers[i].Image == want {
-                        continue
-                }
-                patches = append(patches, map[string]interface{}{
-                        "op":    "replace",
-                        "path":  fmt.Sprintf("/spec/containers/%d/image", i),
-                        "value": want,
-                })
-        }
+	var matched *unstructured.Unstructured
 
-        // Optionally apply to initContainers as well (same policy)
-        for i := range pod.Spec.InitContainers {
-                want := imageMap[pod.Spec.InitContainers[i].Name]
-                if want == "" {
-                        want = defaultImage
-                }
-                if want == "" || pod.Spec.InitContainers[i].Image == want {
-                        continue
-                }
-                patches = append(patches, map[string]interface{}{
-                        "op":    "replace",
-                        "path":  fmt.Sprintf("/spec/initContainers/%d/image", i),
-                        "value": want,
-                })
-        }
+	for i := range crList.Items {
+		it := crList.Items[i]
 
-        if len(patches) == 0 {
-                fmt.Println("ℹ️  Nothing to patch (images already as desired) → allowing without patch")
-                writeResponse(w, review, nil)
-                return
-        }
+		specPodName, found, err := unstructured.NestedString(it.Object, "spec", "podName")
+		if err != nil || !found {
+			continue
+		}
 
-        patchBytes, err := json.Marshal(patches)
-        if err != nil {
-                http.Error(w, "failed to marshal patch", http.StatusInternalServerError)
-                return
-        }
-        writeResponse(w, review, patchBytes)
+		// ✅ STRICT match only
+		if specPodName == podName {
+			matched = &it
+			break
+		}
+	}
+
+	if matched == nil {
+		return nil, nil, "", nil
+	}
+
+	imageMap := make(map[string]string)
+	defaultImage := ""
+
+	// Prefer spec.containers[]: [{name,image}, ...]
+	containers, found, err := unstructured.NestedSlice(matched.Object, "spec", "containers")
+	if err == nil && found {
+		for _, c := range containers {
+			m, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _, _ := unstructured.NestedString(m, "name")
+			image, _, _ := unstructured.NestedString(m, "image")
+			if image == "" {
+				continue
+			}
+			if name != "" {
+				imageMap[name] = image
+			}
+			if defaultImage == "" {
+				defaultImage = image
+			}
+		}
+	}
+
+	// Backward-compat: spec.image string
+	if defaultImage == "" {
+		if img, found, _ := unstructured.NestedString(matched.Object, "spec", "image"); found && img != "" {
+			defaultImage = img
+		}
+	}
+
+	return matched, imageMap, defaultImage, nil
 }
 
 func writeResponse(w http.ResponseWriter, ar admissionv1.AdmissionReview, patch []byte) {
-        resp := admissionv1.AdmissionReview{
-                TypeMeta: metav1.TypeMeta{
-                        APIVersion: "admission.k8s.io/v1",
-                        Kind:       "AdmissionReview",
-                },
-                Response: &admissionv1.AdmissionResponse{
-                        UID:     ar.Request.UID,
-                        Allowed: true,
-                },
-        }
-        if patch != nil {
-                pt := admissionv1.PatchTypeJSONPatch
-                resp.Response.Patch = patch
-                resp.Response.PatchType = &pt
-        }
-        w.Header().Set("Content-Type", "application/json")
-        _ = json.NewEncoder(w).Encode(resp)
+	resp := admissionv1.AdmissionReview{
+		TypeMeta: ar.TypeMeta,
+		Response: &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: true,
+		},
+	}
+	if patch != nil {
+		pt := admissionv1.PatchTypeJSONPatch
+		resp.Response.Patch = patch
+		resp.Response.PatchType = &pt
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func newDynamicClient(kubeconfigPath string) (dynamic.Interface, error) {
+	var cfg *rest.Config
+	var err error
+
+	if kubeconfigPath != "" {
+		cfg, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	} else {
+		cfg, err = rest.InClusterConfig()
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return dynamic.NewForConfig(cfg)
+}
+
+func getenv(k, def string) string {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	return v
 }
