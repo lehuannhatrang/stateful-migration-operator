@@ -1,0 +1,500 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	apischema "k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/util/retry"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	migrationv1 "github.com/lehuannhatrang/stateful-migration-operator/api/v1"
+)
+
+const (
+	// 폴링 주기
+	RestoreCheckInterval = 30 * time.Second
+	// 라벨 키: SM 단위 전파정책/Restore 매칭
+	LabelKeySM = "migration.dcnlab.com/sm"
+)
+
+// +kubebuilder:rbac:groups=migration.dcnlab.com,resources=statefulmigrations,verbs=get;list;watch
+// 참고: Karmada API 접근은 별도 kubeconfig를 쓰므로 이 파일의 RBAC 주석이 Karmada 권한을 보장하지는 않습니다.
+// (Karmada 쪽 권한은 그 kubeconfig의 권한에 따릅니다.)
+
+type MigrationRestoreReconciler struct {
+	// 관리(운영) 클러스터 API client (여기서 StatefulMigration CR들을 unstructured로 조회)
+	client.Client
+	Scheme *runtime.Scheme
+
+	// Karmada control-plane client (RB/PP/Backup/Restore 접근) - 우리 타입으로 통일
+	KarmadaClient *KarmadaClient
+}
+
+func (r *MigrationRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// 폴링 워커가 직접 처리하므로, 누군가 호출해도 안전하게 noop
+	return ctrl.Result{}, nil
+}
+
+// 워커는 RB를 "먼저" 보고(suspension 감지) → 해당 SM을 찾아 → 바로 처리
+func (r *MigrationRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		lg := ctrl.Log.WithName("rb-poller")
+		ticker := time.NewTicker(RestoreCheckInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if r.KarmadaClient == nil {
+					lg.V(4).Info("Karmada client not ready")
+					continue
+				}
+
+				// 1) Karmada에서 RB 전수 조사
+				rbList := &unstructured.UnstructuredList{}
+				rbList.SetGroupVersionKind(apischema.GroupVersionKind{
+					Group:   "work.karmada.io",
+					Version: "v1alpha2",
+					Kind:    "ResourceBindingList",
+				})
+
+				if err := r.KarmadaClient.List(ctx, rbList); err != nil {
+					lg.Error(err, "list ResourceBindings failed")
+					continue
+				}
+
+				for i := range rbList.Items {
+					rb := &rbList.Items[i]
+					if !isRBSuspendedU(rb) {
+						continue
+					}
+					// StatefulSet만 대상으로
+					kind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
+					if !strings.EqualFold(kind, "StatefulSet") {
+						continue
+					}
+
+					// 2) 원본 Ref
+					resNS, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "namespace")
+					resName, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "name")
+					resAPIV, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "apiVersion")
+					resKind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
+
+					// 3) 관리 클러스터에서 관련 SM 탐색
+					smList := &unstructured.UnstructuredList{}
+					smList.SetGroupVersionKind(apischema.GroupVersionKind{
+						Group:   "migration.dcnlab.com",
+						Version: "v1",
+						Kind:    "StatefulMigrationList",
+					})
+					if err := r.Client.List(ctx, smList, &client.ListOptions{Namespace: resNS}); err != nil {
+						lg.Error(err, "list StatefulMigrations failed", "ns", resNS)
+						continue
+					}
+
+					for j := range smList.Items {
+						sm := &smList.Items[j]
+						refNS, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "namespace")
+						refName, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "name")
+						refAPIV, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "apiVersion")
+						refKind, _, _ := unstructured.NestedString(sm.Object, "spec", "resourceRef", "kind")
+
+						if refNS == resNS && refName == resName && strings.EqualFold(refKind, resKind) && refAPIV == resAPIV {
+							if err := r.handleSuspendedRBForSM(ctx, rb, sm); err != nil {
+								lg.Error(err, "handleSuspendedRBForSM failed", "rb", namespacedNameU(rb), "sm", namespacedNameU(sm))
+							}
+						}
+					}
+				}
+			}
+		}
+	}))
+}
+
+func (r *MigrationRestoreReconciler) handleSuspendedRBForSM(ctx context.Context, rb *unstructured.Unstructured, sm *unstructured.Unstructured) error {
+	lg := log.FromContext(ctx)
+
+	if r.KarmadaClient == nil {
+		return fmt.Errorf("Karmada client not initialized")
+	}
+
+	// RB 타깃 클러스터 목록
+	rbClusters, err := getRBClusterNamesU(rb)
+	if err != nil {
+		return fmt.Errorf("parse RB clusters: %w", err)
+	}
+	// SM의 SourceClusters
+	srcClusters, _, _ := nestedStringSlice(sm.Object, "spec", "sourceClusters")
+	targetClusters := diffClusters(rbClusters, srcClusters)
+	if len(targetClusters) == 0 {
+		lg.Info("No destination clusters after excluding source clusters; skip",
+			"rbClusters", rbClusters, "sourceClusters", srcClusters)
+		return nil
+	}
+
+	// 원본 Ref
+	resNS, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "namespace")
+	resName, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "name")
+	resAPIV, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "apiVersion")
+	resKind, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
+
+	// 1) 관련 Backup 수집
+	backups, err := r.listRelatedBackupsU(ctx, resAPIV, resKind, resNS, resName)
+	if err != nil {
+		return fmt.Errorf("list backups: %w", err)
+	}
+	if len(backups) == 0 {
+		lg.Info("No related CheckpointBackups; nothing to restore yet")
+		return nil
+	}
+
+	// 2) SM 단위 PropagationPolicy 보장
+	smName := sm.GetName()
+	bkNS := backups[0].GetNamespace()
+	if err := r.ensurePropagationPolicyU(ctx, smName, bkNS, targetClusters); err != nil {
+		return fmt.Errorf("ensure PP: %w", err)
+	}
+
+	// 3) 백업 → Restore 보장 + 4) Restore RB 바인딩 확인
+	readyAll := true
+	for i := range backups {
+		restore, created, err := r.ensureRestoreFromBackupU(ctx, smName, &backups[i])
+		if err != nil {
+			return fmt.Errorf("ensure restore for %s: %w", backups[i].GetName(), err)
+		}
+		if created {
+			lg.Info("Created CheckpointRestore", "restore", restore.GetName(), "backup", backups[i].GetName())
+		}
+
+		ok, err := r.isRestoreBoundU(ctx, restore, targetClusters)
+		if err != nil {
+			return fmt.Errorf("check restore RB: %w", err)
+		}
+		if !ok {
+			readyAll = false
+			lg.Info("Restore not bound yet", "restore", restore.GetName(), "wantClusters", targetClusters)
+		}
+	}
+
+	// 5) 모두 바인딩 → 원본 RB unsuspend
+	if readyAll {
+		if err := r.unsuspendRB_U(ctx, rb); err != nil {
+			return fmt.Errorf("unsuspend RB: %w", err)
+		}
+		lg.Info("Original RB unsuspended (Dispatching=false)", "rb", namespacedNameU(rb))
+	}
+	return nil
+}
+
+func (r *MigrationRestoreReconciler) listRelatedBackupsU(ctx context.Context, apiVersion, kind, ns, name string) ([]unstructured.Unstructured, error) {
+	if r.KarmadaClient == nil {
+		return nil, fmt.Errorf("Karmada client not initialized")
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(apischema.GroupVersionKind{
+		Group:   "migration.dcnlab.com",
+		Version: "v1",
+		Kind:    "CheckpointBackupList",
+	})
+	if err := r.KarmadaClient.List(ctx, list, &client.ListOptions{Namespace: ns}); err != nil {
+		return nil, err
+	}
+	out := make([]unstructured.Unstructured, 0, len(list.Items))
+	for i := range list.Items {
+		it := list.Items[i]
+		refAPIV, _, _ := unstructured.NestedString(it.Object, "spec", "resourceRef", "apiVersion")
+		refKind, _, _ := unstructured.NestedString(it.Object, "spec", "resourceRef", "kind")
+		refNS, _, _ := unstructured.NestedString(it.Object, "spec", "resourceRef", "namespace")
+		refName, _, _ := unstructured.NestedString(it.Object, "spec", "resourceRef", "name")
+		if refAPIV == apiVersion && strings.EqualFold(refKind, kind) && refNS == ns && refName == name {
+			out = append(out, it)
+		}
+	}
+	return out, nil
+}
+
+func (r *MigrationRestoreReconciler) ensureRestoreFromBackupU(ctx context.Context, smName string, backup *unstructured.Unstructured) (*unstructured.Unstructured, bool, error) {
+	if r.KarmadaClient == nil {
+		return nil, false, fmt.Errorf("Karmada client not initialized")
+	}
+	ns := backup.GetNamespace()
+	bkName := backup.GetName()
+	restoreName := fmt.Sprintf("%s-restore", bkName)
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(apischema.GroupVersionKind{
+		Group:   "migration.dcnlab.com",
+		Version: "v1",
+		Kind:    "CheckpointRestore",
+	})
+	if err := r.KarmadaClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: restoreName}, existing); err == nil {
+		labels := existing.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		if labels[LabelKeySM] != smName {
+			labels[LabelKeySM] = smName
+			existing.SetLabels(labels)
+			if err := r.KarmadaClient.Update(ctx, existing); err != nil {
+				return nil, false, fmt.Errorf("patch restore labels: %w", err)
+			}
+		}
+		return existing, false, nil
+	} else if !apierrors.IsNotFound(err) {
+		return nil, false, fmt.Errorf("get restore: %w", err)
+	}
+
+	restore := &unstructured.Unstructured{}
+	restore.SetGroupVersionKind(apischema.GroupVersionKind{
+		Group:   "migration.dcnlab.com",
+		Version: "v1",
+		Kind:    "CheckpointRestore",
+	})
+	restore.SetNamespace(ns)
+	restore.SetName(restoreName)
+	restore.SetLabels(map[string]string{
+		LabelKeySM:                     smName,
+		"migration.dcnlab.com/restore": "true",
+		"migration.dcnlab.com/backup":  bkName,
+	})
+
+	podName, _, _ := unstructured.NestedString(backup.Object, "spec", "podRef", "name")
+	containers, _, _ := unstructured.NestedSlice(backup.Object, "spec", "containers")
+
+	_ = unstructured.SetNestedField(restore.Object, map[string]interface{}{"name": bkName}, "spec", "backupRef")
+	_ = unstructured.SetNestedField(restore.Object, podName, "spec", "podName")
+	_ = unstructured.SetNestedSlice(restore.Object, containers, "spec", "containers")
+
+	if err := r.KarmadaClient.Create(ctx, restore); err != nil {
+		return nil, false, fmt.Errorf("create restore: %w", err)
+	}
+	return restore, true, nil
+}
+
+func (r *MigrationRestoreReconciler) ensurePropagationPolicyU(ctx context.Context, smName, ns string, clusterNames []string) error {
+	if r.KarmadaClient == nil {
+		return fmt.Errorf("Karmada client not initialized")
+	}
+	if len(clusterNames) == 0 {
+		return fmt.Errorf("no target clusters")
+	}
+	polName := fmt.Sprintf("%s-restore-policy", smName)
+
+	pol := &unstructured.Unstructured{}
+	pol.SetGroupVersionKind(apischema.GroupVersionKind{
+		Group:   "policy.karmada.io",
+		Version: "v1alpha1",
+		Kind:    "PropagationPolicy",
+	})
+	err := r.KarmadaClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: polName}, pol)
+
+	selector := map[string]interface{}{
+		"apiVersion": migrationv1.GroupVersion.String(), // 하드코딩 대신 실제 G/V 사용
+		"kind":       "CheckpointRestore",
+		"labelSelector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{LabelKeySM: smName},
+		},
+	}
+	placement := map[string]interface{}{
+		"clusterAffinity": map[string]interface{}{
+			"clusterNames": stringSliceIface(clusterNames),
+		},
+	}
+
+	switch {
+	case err == nil:
+		need := false
+		rs, _, _ := unstructured.NestedSlice(pol.Object, "spec", "resourceSelectors")
+		if len(rs) != 1 || !resourceSelectorEqual(rs[0], selector) {
+			_ = unstructured.SetNestedSlice(pol.Object, []interface{}{selector}, "spec", "resourceSelectors")
+			need = true
+		}
+		curr, _, _ := unstructured.NestedStringSlice(pol.Object, "spec", "placement", "clusterAffinity", "clusterNames")
+		if !stringSetsEqual(curr, clusterNames) {
+			_ = unstructured.SetNestedField(pol.Object, stringSliceIface(clusterNames), "spec", "placement", "clusterAffinity", "clusterNames")
+			need = true
+		}
+		if need {
+			return r.KarmadaClient.Update(ctx, pol)
+		}
+		return nil
+
+	case apierrors.IsNotFound(err):
+		newPol := &unstructured.Unstructured{}
+		newPol.SetGroupVersionKind(pol.GroupVersionKind())
+		newPol.SetNamespace(ns)
+		newPol.SetName(polName)
+		_ = unstructured.SetNestedSlice(newPol.Object, []interface{}{selector}, "spec", "resourceSelectors")
+		_ = unstructured.SetNestedField(newPol.Object, placement, "spec", "placement")
+		return r.KarmadaClient.Create(ctx, newPol)
+
+	default:
+		return fmt.Errorf("get PP: %w", err)
+	}
+}
+
+func (r *MigrationRestoreReconciler) isRestoreBoundU(ctx context.Context, restore *unstructured.Unstructured, targetClusters []string) (bool, error) {
+	if r.KarmadaClient == nil {
+		return false, fmt.Errorf("Karmada client not initialized")
+	}
+	rbList := &unstructured.UnstructuredList{}
+	rbList.SetGroupVersionKind(apischema.GroupVersionKind{
+		Group:   "work.karmada.io",
+		Version: "v1alpha2",
+		Kind:    "ResourceBindingList",
+	})
+	if err := r.KarmadaClient.List(ctx, rbList, &client.ListOptions{Namespace: restore.GetNamespace()}); err != nil {
+		return false, err
+	}
+	wantAPIV := migrationv1.GroupVersion.String()
+	wantKind := "CheckpointRestore"
+	wantNS := restore.GetNamespace()
+	wantName := restore.GetName()
+
+	for i := range rbList.Items {
+		rb := &rbList.Items[i]
+		apiV, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "apiVersion")
+		kd, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "kind")
+		ns, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "namespace")
+		name, _, _ := unstructured.NestedString(rb.Object, "spec", "resource", "name")
+		if apiV == wantAPIV && strings.EqualFold(kd, wantKind) && ns == wantNS && name == wantName {
+			curr, _ := getRBClusterNamesU(rb)
+			return stringSetsEqual(curr, targetClusters), nil
+		}
+	}
+	return false, nil
+}
+
+func (r *MigrationRestoreReconciler) unsuspendRB_U(ctx context.Context, rb *unstructured.Unstructured) error {
+	if r.KarmadaClient == nil {
+		return fmt.Errorf("Karmada client not initialized")
+	}
+	key := types.NamespacedName{Namespace: rb.GetNamespace(), Name: rb.GetName()}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(rb.GroupVersionKind())
+		if err := r.KarmadaClient.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		// ✅ 호환성: 두 경로 모두 false 로 설정
+		_ = unstructured.SetNestedField(fresh.Object, false, "spec", "suspension", "dispatching")
+		_ = unstructured.SetNestedField(fresh.Object, map[string]interface{}{"dispatching": false}, "spec", "suspension", "suspension")
+		return r.KarmadaClient.Update(ctx, fresh)
+	})
+}
+
+/* ------------------------------ 유틸 ------------------------------ */
+
+func isRBSuspendedU(rb *unstructured.Unstructured) bool {
+	disp, found, _ := unstructured.NestedBool(rb.Object, "spec", "suspension", "suspension", "dispatching")
+	if !found {
+		disp2, _, _ := unstructured.NestedBool(rb.Object, "spec", "suspension", "dispatching")
+		return disp2
+	}
+	return disp
+}
+
+func getRBClusterNamesU(rb *unstructured.Unstructured) ([]string, error) {
+	clusters, found, err := unstructured.NestedSlice(rb.Object, "spec", "clusters")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return []string{}, nil
+	}
+	out := make([]string, 0, len(clusters))
+	for _, it := range clusters {
+		if m, ok := it.(map[string]interface{}); ok {
+			if name, ok := m["name"].(string); ok {
+				out = append(out, name)
+			}
+		}
+	}
+	return out, nil
+}
+
+func stringSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]int, len(a))
+	for _, s := range a {
+		m[s]++
+	}
+	for _, s := range b {
+		if m[s] == 0 {
+			return false
+		}
+		m[s]--
+		if m[s] == 0 {
+			delete(m, s)
+		}
+	}
+	return len(m) == 0
+}
+
+func diffClusters(all, exclude []string) []string {
+	ex := map[string]struct{}{}
+	for _, s := range exclude {
+		ex[s] = struct{}{}
+	}
+	out := make([]string, 0, len(all))
+	for _, a := range all {
+		if _, skip := ex[a]; !skip {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func stringSliceIface(in []string) []interface{} {
+	out := make([]interface{}, len(in))
+	for i := range in {
+		out[i] = in[i]
+	}
+	return out
+}
+
+func resourceSelectorEqual(a interface{}, want map[string]interface{}) bool {
+	ma, ok := a.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if ma["apiVersion"] != want["apiVersion"] || ma["kind"] != want["kind"] {
+		return false
+	}
+	lsa, _, _ := unstructured.NestedMap(ma, "labelSelector")
+	lsb, _, _ := unstructured.NestedMap(want, "labelSelector")
+	return fmt.Sprintf("%v", lsa) == fmt.Sprintf("%v", lsb)
+}
+
+func nestedStringSlice(obj map[string]interface{}, fields ...string) ([]string, bool, error) {
+	raw, found, err := unstructured.NestedSlice(obj, fields...)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out, true, nil
+}
+
+func namespacedNameU(u *unstructured.Unstructured) string {
+	return fmt.Sprintf("%s/%s", u.GetNamespace(), u.GetName())
+}
