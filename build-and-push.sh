@@ -44,18 +44,21 @@ declare -A CONTROLLERS=(
     ["checkpoint"]="checkpointBackup_${VERSION}"
     ["migration"]="migrationBackup_${VERSION}"
     ["restore"]="migrationRestore_${VERSION}"
+    ["apiserver"]="checkpointApiserver_${VERSION}"
 )
 
 declare -A CONTROLLER_FLAGS=(
     ["checkpoint"]="--enable-checkpoint-backup-controller=true --enable-migration-backup-controller=false --enable-migration-restore-controller=false"
     ["migration"]="--enable-checkpoint-backup-controller=false --enable-migration-backup-controller=true --enable-migration-restore-controller=false"
     ["restore"]="--enable-checkpoint-backup-controller=false --enable-migration-backup-controller=false --enable-migration-restore-controller=true"
+    ["apiserver"]=""
 )
 
 declare -A CONTROLLER_DESCRIPTIONS=(
     ["checkpoint"]="CheckpointBackup Controller (DaemonSet for member clusters)"
     ["migration"]="MigrationBackup Controller (Karmada control plane)"
     ["restore"]="MigrationRestore Controller (Karmada control plane)"
+    ["apiserver"]="Checkpoint API Server (REST API for checkpoint management)"
 )
 
 # Function to show usage
@@ -73,21 +76,24 @@ show_usage() {
     echo "  checkpoint    - Build CheckpointBackup controller only (for member clusters)"
     echo "  migration     - Build MigrationBackup controller only (for Karmada control plane)"
     echo "  restore       - Build MigrationRestore controller only (for Karmada control plane)"
-    echo "  all           - Build all controllers (default)"
+    echo "  apiserver     - Build Checkpoint API Server only (REST API)"
+    echo "  all           - Build all controllers and API server (default)"
     echo
     echo "Examples:"
-    echo "  $0                        # Build all controllers with default version"
-    echo "  $0 all                    # Build all controllers with default version"
-    echo "  $0 all v1.17              # Build all controllers with version v1.17"
+    echo "  $0                        # Build all with default version"
+    echo "  $0 all                    # Build all with default version"
+    echo "  $0 all v1.17              # Build all with version v1.17"
     echo "  $0 checkpoint             # Build only CheckpointBackup controller"
     echo "  $0 checkpoint v2.0        # Build CheckpointBackup with version v2.0"
     echo "  $0 migration v1.18        # Build MigrationBackup with version v1.18"
     echo "  $0 restore v1.18          # Build MigrationRestore with version v1.18"
+    echo "  $0 apiserver v1.0         # Build Checkpoint API Server with version v1.0"
     echo
     echo "Built images will be:"
     echo "  ${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:checkpointBackup_${VERSION}"
     echo "  ${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:migrationBackup_${VERSION}"
     echo "  ${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:migrationRestore_${VERSION}"
+    echo "  ${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:checkpointApiserver_${VERSION}"
 }
 
 # Function to check prerequisites
@@ -165,7 +171,44 @@ create_controller_dockerfile() {
         flag_array+="\"$flag\""
     done
     
-    if [[ "$controller_type" == "checkpoint" ]]; then
+    if [[ "$controller_type" == "apiserver" ]]; then
+        # Checkpoint API Server builds a separate binary
+        cat > ${dockerfile_name} <<EOF
+# Build the apiserver binary
+FROM golang:1.24-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+
+# Install git (needed for go mod download)
+RUN apk add --no-cache git
+
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the go source
+COPY cmd/apiserver/ cmd/apiserver/
+COPY api/ api/
+COPY internal/apiserver/ internal/apiserver/
+
+# Build
+RUN CGO_ENABLED=0 GOOS=\${TARGETOS:-linux} GOARCH=\${TARGETARCH} go build -a -o apiserver cmd/apiserver/main.go
+
+# Use distroless as minimal base image
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/apiserver .
+USER 65532:65532
+
+ENTRYPOINT ["/apiserver"]
+EOF
+    elif [[ "$controller_type" == "checkpoint" ]]; then
         # CheckpointBackup controller needs buildah and other tools
         cat > ${dockerfile_name} <<EOF
 # Build the manager binary
@@ -305,7 +348,11 @@ build_and_push_controller() {
     
     # Test the image locally
     print_status "Testing the image locally..."
-    if docker run --rm --entrypoint="" "${full_image_name}" /manager --help >/dev/null 2>&1; then
+    local test_binary="/manager"
+    if [[ "$controller_type" == "apiserver" ]]; then
+        test_binary="/apiserver"
+    fi
+    if docker run --rm --entrypoint="" "${full_image_name}" ${test_binary} --help >/dev/null 2>&1; then
         print_success "Image test passed"
     else
         print_warning "Image test failed, but continuing with push"
@@ -356,6 +403,10 @@ show_summary() {
     echo
     echo "For MigrationRestore controller (Karmada):"
     echo "  make deploy IMG=${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:migrationRestore_${VERSION}"
+    echo
+    echo "For Checkpoint API Server:"
+    echo "  # Update config/apiserver/deployment.yaml with:"
+    echo "  image: ${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:checkpointApiserver_${VERSION}"
     echo
 }
 
@@ -469,7 +520,57 @@ spec:
             memory: 64Mi
 EOF
 
-    print_success "Created deployment examples: checkpoint-deploy-example.yaml, migration-deploy-example.yaml, restore-deploy-example.yaml"
+    # Checkpoint API Server deployment example
+    cat > apiserver-deploy-example.yaml <<EOF
+# Example deployment for Checkpoint API Server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkpoint-apiserver
+  namespace: stateful-migration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkpoint-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkpoint-apiserver
+    spec:
+      serviceAccountName: checkpoint-apiserver-sa
+      containers:
+      - name: apiserver
+        image: ${DOCKERHUB_USERNAME}/${REPOSITORY_NAME}:checkpointApiserver_${VERSION}
+        command:
+        - /apiserver
+        args:
+        - --bind-address=:8090
+        ports:
+        - containerPort: 8090
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8090
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8090
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+EOF
+
+    print_success "Created deployment examples: checkpoint-deploy-example.yaml, migration-deploy-example.yaml, restore-deploy-example.yaml, apiserver-deploy-example.yaml"
 }
 
 # Main execution
@@ -484,6 +585,7 @@ main() {
     CONTROLLERS["checkpoint"]="checkpointBackup_${VERSION}"
     CONTROLLERS["migration"]="migrationBackup_${VERSION}"
     CONTROLLERS["restore"]="migrationRestore_${VERSION}"
+    CONTROLLERS["apiserver"]="checkpointApiserver_${VERSION}"
     
     # Initialize build summary
     rm -f /tmp/built_images.txt
@@ -497,7 +599,7 @@ main() {
     echo
     
     # Validate input
-    if [[ "$controller_type" != "all" && "$controller_type" != "checkpoint" && "$controller_type" != "migration" && "$controller_type" != "restore" ]]; then
+    if [[ "$controller_type" != "all" && "$controller_type" != "checkpoint" && "$controller_type" != "migration" && "$controller_type" != "restore" && "$controller_type" != "apiserver" ]]; then
         print_error "Invalid controller type: $controller_type"
         echo
         show_usage
@@ -513,13 +615,13 @@ main() {
     # Build controllers based on selection
     case "$controller_type" in
         "all")
-            print_status "Building all controllers..."
-            for controller in "checkpoint" "migration" "restore"; do
+            print_status "Building all controllers and API server..."
+            for controller in "checkpoint" "migration" "restore" "apiserver"; do
                 build_and_push_controller "$controller"
             done
             ;;
-        "checkpoint"|"migration"|"restore")
-            print_status "Building ${controller_type} controller..."
+        "checkpoint"|"migration"|"restore"|"apiserver")
+            print_status "Building ${controller_type}..."
             build_and_push_controller "$controller_type"
             ;;
     esac

@@ -34,6 +34,11 @@ type CheckpointBackupSpec struct {
 	// +optional
 	StopPod *bool `json:"stopPod,omitempty"`
 
+	// BuildImage specifies whether to build a container image from the checkpoint (default: true)
+	// When false, only the checkpoint file is created and stored to checkpoint storage
+	// +optional
+	BuildImage *bool `json:"buildImage,omitempty"`
+
 	// PodRef specifies the pod to checkpoint
 	// +required
 	PodRef PodRef `json:"podRef"`
@@ -89,9 +94,13 @@ type CheckpointFile struct {
 	// +required
 	ContainerName string `json:"containerName"`
 
-	// FilePath is the relative path to the checkpoint file
+	// FilePath is the relative path to the checkpoint file on the node
 	// +required
 	FilePath string `json:"filePath"`
+
+	// StoragePath is the path within the checkpoint storage PVC where the file is stored
+	// +optional
+	StoragePath string `json:"storagePath,omitempty"`
 
 	// CheckpointTime is when the checkpoint was created
 	// +optional

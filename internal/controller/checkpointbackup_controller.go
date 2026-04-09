@@ -44,13 +44,16 @@ import (
 )
 
 const (
-	CheckpointBackupFinalizer = "checkpointbackup.migration.dcnlab.com/finalizer"
-	CheckpointBasePath        = "/var/lib/kubelet/checkpoints"
-	ServiceAccountPath        = "/var/run/secrets/kubernetes.io/serviceaccount"
+	CheckpointBackupFinalizer    = "checkpointbackup.migration.dcnlab.com/finalizer"
+	CheckpointBasePath           = "/var/lib/kubelet/checkpoints"
+	DefaultCheckpointStoragePath = "/checkpoint-storage"
+	ServiceAccountPath           = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 	// Phase constants
 	PhaseCheckpointing       = "Checkpointing"
 	PhaseCheckpointed        = "Checkpointed"
+	PhaseStoringCheckpoint   = "StoringCheckpoint"
+	PhaseCheckpointStored    = "CheckpointStored"
 	PhaseImageBuilding       = "ImageBuilding"
 	PhaseImageBuilt          = "ImageBuilt"
 	PhaseImagePushing        = "ImagePushing"
@@ -284,6 +287,125 @@ func (r *CheckpointBackupReconciler) isPodOnThisNode(ctx context.Context, backup
 // shouldStopPod returns true if the pod should be deleted after checkpointing
 func (r *CheckpointBackupReconciler) shouldStopPod(backup *migrationv1.CheckpointBackup) bool {
 	return backup.Spec.StopPod != nil && *backup.Spec.StopPod
+}
+
+// shouldBuildImage returns true if the checkpoint should be built into a container image.
+// Defaults to true when BuildImage is not set (backward compatible).
+func (r *CheckpointBackupReconciler) shouldBuildImage(backup *migrationv1.CheckpointBackup) bool {
+	return backup.Spec.BuildImage == nil || *backup.Spec.BuildImage
+}
+
+// getCheckpointStoragePath returns the PVC mount path for checkpoint storage
+func getCheckpointStoragePath() string {
+	if p := os.Getenv("CHECKPOINT_STORAGE_PATH"); p != "" {
+		return p
+	}
+	return DefaultCheckpointStoragePath
+}
+
+// storeCheckpointFile copies a checkpoint file from the kubelet checkpoint directory
+// into the PVC-backed storage, organized by namespace.
+func (r *CheckpointBackupReconciler) storeCheckpointFile(ctx context.Context, backup *migrationv1.CheckpointBackup, containerName, checkpointPath string) (string, error) {
+	log := logf.FromContext(ctx)
+
+	if err := r.updatePhase(ctx, backup, PhaseStoringCheckpoint, fmt.Sprintf("Storing checkpoint for container %s", containerName)); err != nil {
+		log.Error(err, "Failed to update phase to StoringCheckpoint")
+	}
+
+	srcPath := filepath.Join(CheckpointBasePath, checkpointPath)
+	storagePath := getCheckpointStoragePath()
+	nsDir := filepath.Join(storagePath, backup.Spec.PodRef.Namespace)
+
+	if err := os.MkdirAll(nsDir, 0755); err != nil {
+		if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to create storage directory: %v", err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update phase to Failed")
+		}
+		return "", fmt.Errorf("failed to create namespace directory %s: %w", nsDir, err)
+	}
+
+	destPath := filepath.Join(nsDir, filepath.Base(checkpointPath))
+
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to open checkpoint file: %v", err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update phase to Failed")
+		}
+		return "", fmt.Errorf("failed to open source checkpoint file %s: %w", srcPath, err)
+	}
+	defer srcFile.Close()
+
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to create storage file: %v", err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update phase to Failed")
+		}
+		return "", fmt.Errorf("failed to create destination file %s: %w", destPath, err)
+	}
+	defer destFile.Close()
+
+	if _, err := io.Copy(destFile, srcFile); err != nil {
+		if updateErr := r.updatePhase(ctx, backup, PhaseFailed, fmt.Sprintf("Failed to copy checkpoint file: %v", err)); updateErr != nil {
+			log.Error(updateErr, "Failed to update phase to Failed")
+		}
+		return "", fmt.Errorf("failed to copy checkpoint file to storage: %w", err)
+	}
+
+	relStoragePath := filepath.Join(backup.Spec.PodRef.Namespace, filepath.Base(checkpointPath))
+
+	if err := r.recordCheckpointStoragePath(ctx, backup, containerName, relStoragePath); err != nil {
+		log.Error(err, "Failed to record storage path", "container", containerName)
+	}
+
+	if err := r.updatePhase(ctx, backup, PhaseCheckpointStored, fmt.Sprintf("Checkpoint stored for container %s: %s", containerName, relStoragePath)); err != nil {
+		log.Error(err, "Failed to update phase to CheckpointStored")
+	}
+
+	log.Info("Stored checkpoint file to PVC", "src", srcPath, "dest", destPath, "storagePath", relStoragePath)
+
+	if err := r.deleteCheckpointFile(srcPath); err != nil {
+		log.Error(err, "Failed to delete original checkpoint file after storage", "path", srcPath)
+	}
+
+	return relStoragePath, nil
+}
+
+// recordCheckpointStoragePath updates the StoragePath field in the checkpoint file status
+func (r *CheckpointBackupReconciler) recordCheckpointStoragePath(ctx context.Context, backup *migrationv1.CheckpointBackup, containerName, storagePath string) error {
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		var latestBackup migrationv1.CheckpointBackup
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      backup.Name,
+			Namespace: backup.Namespace,
+		}, &latestBackup); err != nil {
+			return fmt.Errorf("failed to get latest backup: %w", err)
+		}
+
+		updated := false
+		for j := range latestBackup.Status.CheckpointFiles {
+			if latestBackup.Status.CheckpointFiles[j].ContainerName == containerName {
+				latestBackup.Status.CheckpointFiles[j].StoragePath = storagePath
+				updated = true
+				break
+			}
+		}
+
+		if !updated {
+			return fmt.Errorf("checkpoint file entry not found for container %s", containerName)
+		}
+
+		if err := r.Status().Update(ctx, &latestBackup); err != nil {
+			if errors.IsConflict(err) && i < maxRetries-1 {
+				time.Sleep(time.Millisecond * 100 * time.Duration(i+1))
+				continue
+			}
+			return fmt.Errorf("failed to update storage path: %w", err)
+		}
+
+		backup.Status.CheckpointFiles = latestBackup.Status.CheckpointFiles
+		return nil
+	}
+	return fmt.Errorf("failed to record storage path after %d retries", maxRetries)
 }
 
 // getCheckpointFilePath returns the checkpoint file path from status if it exists
@@ -581,6 +703,8 @@ func (r *CheckpointBackupReconciler) performCheckpoint(ctx context.Context, back
 	// Check if already in progress (shouldn't happen, but defensive check)
 	if backup.Status.Phase == PhaseCheckpointing ||
 		backup.Status.Phase == PhaseCheckpointed ||
+		backup.Status.Phase == PhaseStoringCheckpoint ||
+		backup.Status.Phase == PhaseCheckpointStored ||
 		backup.Status.Phase == PhaseImageBuilding ||
 		backup.Status.Phase == PhaseImageBuilt ||
 		backup.Status.Phase == PhaseImagePushing ||
@@ -693,8 +817,7 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 		// Verify the file still exists on disk
 		fullCheckpointPath := filepath.Join(CheckpointBasePath, checkpointPath)
 		if _, err := os.Stat(fullCheckpointPath); os.IsNotExist(err) {
-			// File doesn't exist - check if we've already built an image for this container
-			// If image is already built, we don't need the checkpoint file anymore
+			// File doesn't exist - check if already processed (image built or stored to PVC)
 			imageAlreadyBuilt := false
 			for _, builtImage := range backup.Status.BuiltImages {
 				if builtImage.ContainerName == container.Name {
@@ -706,13 +829,21 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 				}
 			}
 
-			if imageAlreadyBuilt {
-				// Image exists, checkpoint file was deleted - this is expected
-				// Just return, no need to do anything
-				log.Info("Skipping container as image already built", "container", container.Name)
+			alreadyStored := false
+			for _, cf := range backup.Status.CheckpointFiles {
+				if cf.ContainerName == container.Name && cf.StoragePath != "" {
+					alreadyStored = true
+					log.Info("Checkpoint already stored to PVC",
+						"container", container.Name,
+						"storagePath", cf.StoragePath)
+					break
+				}
+			}
+
+			if imageAlreadyBuilt || alreadyStored {
+				log.Info("Skipping container as already processed", "container", container.Name)
 				return nil
 			} else {
-				// Image not built yet, but checkpoint file is missing - need to recreate
 				log.Info("Checkpoint file in status does not exist on disk, will recreate", "path", fullCheckpointPath)
 				checkpointPath = ""
 			}
@@ -764,6 +895,14 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 		log.Info("Checkpoint file found as expected", "path", checkpointPath)
 	}
 
+	// If BuildImage is disabled, store checkpoint to PVC and skip image building
+	if !r.shouldBuildImage(backup) {
+		if _, err := r.storeCheckpointFile(ctx, backup, container.Name, checkpointPath); err != nil {
+			return fmt.Errorf("failed to store checkpoint file: %w", err)
+		}
+		return nil
+	}
+
 	// Step 2: Get the original container image
 	var baseImage string
 	for _, c := range pod.Spec.Containers {
@@ -779,7 +918,6 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 	// Step 3: Determine the image name to use
 	imageName := container.Image
 	if backup.Spec.Registry == nil || container.Image == "" {
-		// If no registry is provided or no image specified, use localhost with a generated name
 		imageName = fmt.Sprintf("localhost/checkpoint-%s-%s:%s",
 			backup.Spec.PodRef.Name,
 			container.Name,
@@ -834,17 +972,12 @@ func (r *CheckpointBackupReconciler) checkpointContainer(ctx context.Context, ba
 	// Step 6: Record the built image in the backup status
 	if err := r.recordBuiltImage(ctx, backup, container.Name, imageName, pushed); err != nil {
 		log.Error(err, "Failed to record built image", "container", container.Name, "image", imageName)
-		// Don't return error here as the checkpoint was successful
 	}
 
 	// Step 7: Clean up checkpoint file after successful build and push (if configured)
 	if backup.Spec.Registry == nil || pushed {
-		// Delete checkpoint file if:
-		// - No registry (localhost only), image is built
-		// - Registry configured and image was pushed successfully
 		if err := r.deleteCheckpointFile(fullCheckpointPath); err != nil {
 			log.Error(err, "Failed to delete checkpoint file", "path", fullCheckpointPath)
-			// Don't return error here, just log it
 		} else {
 			log.Info("Deleted checkpoint file after successful completion", "path", fullCheckpointPath)
 		}

@@ -126,6 +126,11 @@ func (in *CheckpointBackupSpec) DeepCopyInto(out *CheckpointBackupSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.BuildImage != nil {
+		in, out := &in.BuildImage, &out.BuildImage
+		*out = new(bool)
+		**out = **in
+	}
 	out.PodRef = in.PodRef
 	out.ResourceRef = in.ResourceRef
 	if in.Registry != nil {

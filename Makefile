@@ -108,9 +108,17 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-apiserver
+build-apiserver: fmt vet ## Build checkpoint API server binary.
+	go build -o bin/apiserver cmd/apiserver/main.go
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
+
+.PHONY: run-apiserver
+run-apiserver: fmt vet ## Run the checkpoint API server from your host.
+	go run ./cmd/apiserver/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -122,6 +130,16 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+APISERVER_IMG ?= checkpoint-apiserver:latest
+
+.PHONY: docker-build-apiserver
+docker-build-apiserver: ## Build docker image for the checkpoint API server.
+	$(CONTAINER_TOOL) build -t ${APISERVER_IMG} -f Dockerfile.apiserver .
+
+.PHONY: docker-push-apiserver
+docker-push-apiserver: ## Push docker image for the checkpoint API server.
+	$(CONTAINER_TOOL) push ${APISERVER_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

@@ -1,0 +1,46 @@
+# Example deployment for Checkpoint API Server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkpoint-apiserver
+  namespace: stateful-migration
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkpoint-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkpoint-apiserver
+    spec:
+      serviceAccountName: checkpoint-apiserver-sa
+      containers:
+      - name: apiserver
+        image: lehuannhatrang/stateful-migration-operator:checkpointApiserver_v2.9
+        command:
+        - /apiserver
+        args:
+        - --bind-address=:8090
+        ports:
+        - containerPort: 8090
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8090
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8090
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi

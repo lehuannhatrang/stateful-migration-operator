@@ -96,6 +96,9 @@ spec:
         - name: kubelet-checkpoints
           mountPath: /var/lib/kubelet/checkpoints
           readOnly: false
+        - name: checkpoint-storage
+          mountPath: /checkpoint-storage
+          readOnly: false
         - name: buildah-storage
           mountPath: /var/lib/containers
           readOnly: false
@@ -116,6 +119,9 @@ spec:
         hostPath:
           path: /var/lib/kubelet/checkpoints
           type: DirectoryOrCreate
+      - name: checkpoint-storage
+        persistentVolumeClaim:
+          claimName: checkpoint-storage
       - name: buildah-storage
         hostPath:
           path: /var/lib/containers
@@ -136,4 +142,4 @@ spec:
         hostPath:
           path: /var/run
           type: Directory
-      terminationGracePeriodSeconds: 30 
+      terminationGracePeriodSeconds: 30

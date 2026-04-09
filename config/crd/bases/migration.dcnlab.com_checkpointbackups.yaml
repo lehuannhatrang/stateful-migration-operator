@@ -39,6 +39,11 @@ spec:
           spec:
             description: spec defines the desired state of CheckpointBackup
             properties:
+              buildImage:
+                description: |-
+                  BuildImage specifies whether to build a container image from the checkpoint (default: true)
+                  When false, only the checkpoint file is created and stored to checkpoint storage
+                type: boolean
               containers:
                 description: Containers specifies the container configurations for
                   checkpoints
@@ -177,7 +182,11 @@ spec:
                       type: string
                     filePath:
                       description: FilePath is the relative path to the checkpoint
-                        file
+                        file on the node
+                      type: string
+                    storagePath:
+                      description: StoragePath is the path within the checkpoint storage
+                        PVC where the file is stored
                       type: string
                   required:
                   - containerName
