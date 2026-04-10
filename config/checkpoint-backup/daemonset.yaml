@@ -95,7 +95,7 @@ spec:
         lifecycle:
           postStart:
             exec:
-              command: ["/bin/sh", "-c", "mount --bind /data/checkpoints /mount-to-host"]
+              command: ["/bin/sh", "-c", "mount --bind /checkpoint-storage /mount-to-host"]
         volumeMounts:
         - name: host-storage
           mountPath: /mount-to-host
