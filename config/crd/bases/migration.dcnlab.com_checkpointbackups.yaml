@@ -61,6 +61,23 @@ spec:
                   - name
                   type: object
                 type: array
+              metadata:
+                description: Metadata holds optional contextual information about
+                  the checkpoint origin
+                properties:
+                  kernelId:
+                    description: KernelID is the Jupyter kernel ID associated with
+                      this checkpoint
+                    type: string
+                  kernelName:
+                    description: KernelName is the human-readable name of the Jupyter
+                      kernel
+                    type: string
+                  notebookName:
+                    description: NotebookName is the name of the notebook associated
+                      with this checkpoint
+                    type: string
+                type: object
               podRef:
                 description: PodRef specifies the pod to checkpoint
                 properties:

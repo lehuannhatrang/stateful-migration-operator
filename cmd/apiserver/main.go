@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -46,23 +45,13 @@ func init() {
 
 func main() {
 	var bindAddr string
-	var kubeconfig string
 
 	flag.StringVar(&bindAddr, "bind-address", ":8090", "The address the API server binds to.")
-	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file. If unset, uses in-cluster config.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	var restConfig = ctrl.GetConfigOrDie()
-	if kubeconfig != "" {
-		var err error
-		restConfig, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err != nil {
-			logger.Error("failed to build kubeconfig", "error", err)
-			os.Exit(1)
-		}
-	}
+	restConfig := ctrl.GetConfigOrDie()
 
 	k8sClient, err := client.New(restConfig, client.Options{Scheme: scheme})
 	if err != nil {

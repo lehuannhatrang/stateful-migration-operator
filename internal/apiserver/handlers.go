@@ -39,19 +39,24 @@ func (s *Server) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	kernelID := ""
+	if req.Metadata != nil {
+		kernelID = req.Metadata.KernelID
+	}
+
 	if req.Namespace == "" {
 		s.writeError(w, http.StatusBadRequest, "namespace is required", "")
 		return
 	}
-	if req.PodName == "" && req.KernelID == "" {
-		s.writeError(w, http.StatusBadRequest, "either podName or kernelId is required", "")
+	if req.PodName == "" && kernelID == "" {
+		s.writeError(w, http.StatusBadRequest, "either podName or metadata.kernelId is required", "")
 		return
 	}
 
 	// Resolve pod from kernelId if podName is not provided
 	var resolvedPod *corev1.Pod
 	if req.PodName == "" {
-		pod, err := s.findPodByKernelID(r, req.Namespace, req.KernelID)
+		pod, err := s.findPodByKernelID(r, req.Namespace, kernelID)
 		if err != nil {
 			s.writeError(w, http.StatusInternalServerError, "failed to find pod by kernel ID", err.Error())
 			return
@@ -59,12 +64,12 @@ func (s *Server) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) 
 		if pod == nil {
 			s.writeError(w, http.StatusNotFound,
 				"no pod found with kernel_id label",
-				fmt.Sprintf("no running pod with label kernel_id=%s in namespace %s", req.KernelID, req.Namespace))
+				fmt.Sprintf("no running pod with label kernel_id=%s in namespace %s", kernelID, req.Namespace))
 			return
 		}
 		req.PodName = pod.Name
 		resolvedPod = pod
-		s.logger.Info("resolved pod from kernel ID", "kernelId", req.KernelID, "pod", pod.Name)
+		s.logger.Info("resolved pod from kernel ID", "kernelId", kernelID, "pod", pod.Name)
 	}
 
 	// Derive resourceRef from pod owner references when not provided
@@ -116,9 +121,17 @@ func (s *Server) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	if req.KernelID != "" {
-		backup.ObjectMeta.Labels = map[string]string{
-			"migration.dcnlab.com/kernel-id": req.KernelID,
+	if req.Metadata != nil {
+		backup.Spec.Metadata = &migrationv1.CheckpointMetadata{
+			KernelID:     req.Metadata.KernelID,
+			KernelName:   req.Metadata.KernelName,
+			NotebookName: req.Metadata.NotebookName,
+		}
+		if req.Metadata.KernelID != "" {
+			if backup.ObjectMeta.Labels == nil {
+				backup.ObjectMeta.Labels = make(map[string]string)
+			}
+			backup.ObjectMeta.Labels["migration.dcnlab.com/kernel-id"] = req.Metadata.KernelID
 		}
 	}
 
@@ -392,6 +405,14 @@ func toCheckpointResponse(backup *migrationv1.CheckpointBackup) CheckpointRespon
 			Namespace:  backup.Spec.ResourceRef.Namespace,
 		},
 		CreatedAt: backup.CreationTimestamp.Time,
+	}
+
+	if backup.Spec.Metadata != nil {
+		resp.Metadata = &CheckpointMetadataResp{
+			KernelID:     backup.Spec.Metadata.KernelID,
+			KernelName:   backup.Spec.Metadata.KernelName,
+			NotebookName: backup.Spec.Metadata.NotebookName,
+		}
 	}
 
 	if backup.Status.LastCheckpointTime != nil {

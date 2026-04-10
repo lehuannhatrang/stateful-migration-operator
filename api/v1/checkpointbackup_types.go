@@ -55,6 +55,26 @@ type CheckpointBackupSpec struct {
 	// Containers specifies the container configurations for checkpoints
 	// +optional
 	Containers []Container `json:"containers,omitempty"`
+
+	// Metadata holds optional contextual information about the checkpoint origin
+	// +optional
+	Metadata *CheckpointMetadata `json:"metadata,omitempty"`
+}
+
+// CheckpointMetadata holds optional contextual information about the checkpoint origin,
+// such as the Jupyter kernel or notebook it was created from.
+type CheckpointMetadata struct {
+	// KernelID is the Jupyter kernel ID associated with this checkpoint
+	// +optional
+	KernelID string `json:"kernelId,omitempty"`
+
+	// KernelName is the human-readable name of the Jupyter kernel
+	// +optional
+	KernelName string `json:"kernelName,omitempty"`
+
+	// NotebookName is the name of the notebook associated with this checkpoint
+	// +optional
+	NotebookName string `json:"notebookName,omitempty"`
 }
 
 // CheckpointBackupStatus defines the observed state of CheckpointBackup.

@@ -33,7 +33,7 @@ spec:
         effect: NoExecute
       containers:
       - name: controller
-        image: docker.io/lehuannhatrang/stateful-migration-operator:checkpointBackup_v2.9
+        image: docker.io/lehuannhatrang/stateful-migration-operator:checkpointBackup_v2.11
         imagePullPolicy: IfNotPresent
         command:
         - /manager
@@ -92,7 +92,14 @@ spec:
             add:
             - SYS_ADMIN
             - SYS_PTRACE
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "mount --bind /data/checkpoints /mount-to-host"]
         volumeMounts:
+        - name: host-storage
+          mountPath: /mount-to-host
+          mountPropagation: Bidirectional
         - name: kubelet-checkpoints
           mountPath: /var/lib/kubelet/checkpoints
           readOnly: false
@@ -115,6 +122,10 @@ spec:
           mountPath: /var/run
           readOnly: false
       volumes:
+      - name: host-storage
+        hostPath:
+          path: /shared-pvc/checkpoint-storage
+          type: DirectoryOrCreate
       - name: kubelet-checkpoints
         hostPath:
           path: /var/lib/kubelet/checkpoints

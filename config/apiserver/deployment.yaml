@@ -23,7 +23,7 @@ spec:
       serviceAccountName: checkpoint-apiserver-sa
       containers:
       - name: apiserver
-        image: docker.io/lehuannhatrang/stateful-migration-operator:checkpointApiserver_v2.9
+        image: docker.io/lehuannhatrang/stateful-migration-operator:checkpointApiserver_v2.11
         imagePullPolicy: IfNotPresent
         command:
         - /apiserver

@@ -19,19 +19,26 @@ package apiserver
 import "time"
 
 // CreateCheckpointRequest is the request body for triggering a new checkpoint.
-// Either podName or kernelId must be provided. If kernelId is set, the API server
-// resolves it to a pod by searching for a pod with a matching "kernel_id" label.
+// Either podName or metadata.kernelId must be provided. If metadata.kernelId is set,
+// the API server resolves it to a pod by searching for a pod with a matching "kernel_id" label.
 type CreateCheckpointRequest struct {
-	Name        string              `json:"name,omitempty"`
-	Namespace   string              `json:"namespace"`
-	PodName     string              `json:"podName,omitempty"`
-	KernelID    string              `json:"kernelId,omitempty"`
-	ResourceRef *ResourceRefRequest `json:"resourceRef,omitempty"`
-	Containers  []ContainerRequest  `json:"containers,omitempty"`
-	BuildImage  *bool               `json:"buildImage,omitempty"`
-	Schedule    string              `json:"schedule,omitempty"`
-	StopPod     *bool               `json:"stopPod,omitempty"`
-	Registry    *RegistryRequest    `json:"registry,omitempty"`
+	Name        string                     `json:"name,omitempty"`
+	Namespace   string                     `json:"namespace"`
+	PodName     string                     `json:"podName,omitempty"`
+	ResourceRef *ResourceRefRequest        `json:"resourceRef,omitempty"`
+	Containers  []ContainerRequest         `json:"containers,omitempty"`
+	BuildImage  *bool                      `json:"buildImage,omitempty"`
+	Schedule    string                     `json:"schedule,omitempty"`
+	StopPod     *bool                      `json:"stopPod,omitempty"`
+	Registry    *RegistryRequest           `json:"registry,omitempty"`
+	Metadata    *CheckpointMetadataRequest `json:"metadata,omitempty"`
+}
+
+// CheckpointMetadataRequest holds optional contextual information sent with the create request.
+type CheckpointMetadataRequest struct {
+	KernelID     string `json:"kernelId,omitempty"`
+	KernelName   string `json:"kernelName,omitempty"`
+	NotebookName string `json:"notebookName,omitempty"`
 }
 
 // ResourceRefRequest maps to the CRD ResourceRef.
@@ -78,19 +85,27 @@ type RestoreCheckpointRequest struct {
 
 // CheckpointResponse is the API response for a single checkpoint.
 type CheckpointResponse struct {
-	Name               string               `json:"name"`
-	Namespace          string               `json:"namespace"`
-	Phase              string               `json:"phase,omitempty"`
-	Message            string               `json:"message,omitempty"`
-	Schedule           string               `json:"schedule"`
-	BuildImage         *bool                `json:"buildImage,omitempty"`
-	StopPod            *bool                `json:"stopPod,omitempty"`
-	PodRef             PodRefResponse       `json:"podRef"`
-	ResourceRef        ResourceRefResponse  `json:"resourceRef"`
-	LastCheckpointTime *time.Time           `json:"lastCheckpointTime,omitempty"`
-	CheckpointFiles    []CheckpointFileResp `json:"checkpointFiles,omitempty"`
-	BuiltImages        []BuiltImageResp     `json:"builtImages,omitempty"`
-	CreatedAt          time.Time            `json:"createdAt"`
+	Name               string                  `json:"name"`
+	Namespace          string                  `json:"namespace"`
+	Phase              string                  `json:"phase,omitempty"`
+	Message            string                  `json:"message,omitempty"`
+	Schedule           string                  `json:"schedule"`
+	BuildImage         *bool                   `json:"buildImage,omitempty"`
+	StopPod            *bool                   `json:"stopPod,omitempty"`
+	PodRef             PodRefResponse          `json:"podRef"`
+	ResourceRef        ResourceRefResponse     `json:"resourceRef"`
+	Metadata           *CheckpointMetadataResp `json:"metadata,omitempty"`
+	LastCheckpointTime *time.Time              `json:"lastCheckpointTime,omitempty"`
+	CheckpointFiles    []CheckpointFileResp    `json:"checkpointFiles,omitempty"`
+	BuiltImages        []BuiltImageResp        `json:"builtImages,omitempty"`
+	CreatedAt          time.Time               `json:"createdAt"`
+}
+
+// CheckpointMetadataResp is the metadata section returned in checkpoint responses.
+type CheckpointMetadataResp struct {
+	KernelID     string `json:"kernelId,omitempty"`
+	KernelName   string `json:"kernelName,omitempty"`
+	NotebookName string `json:"notebookName,omitempty"`
 }
 
 // PodRefResponse is the pod reference in the API response.
