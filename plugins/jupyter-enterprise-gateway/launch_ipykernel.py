@@ -54,11 +54,11 @@ __spark_context = None
 # ---------------------------------------------------------------------------
 # Migration-aware reconnection state
 # ---------------------------------------------------------------------------
-# Populated after the initial connection info is sent to JEG. Preserved across
-# CRIU checkpoint/restore since it lives in process memory. These values serve
-# as the *fallback* – after a restore the container environment is authoritative
-# because kernel_id, public_key, and response_addr may differ from the
-# checkpointed process.
+# _migration_params is populated before start_ipython() and serves as the
+# fallback for reconnection.  start_ipython(locals()) aggressively deletes
+# every non-dunder name from the module namespace, so all reconnection logic
+# is encapsulated in _MigrationHandler whose instance survives because the
+# signal subsystem holds a reference to its bound method.
 _migration_params = {}
 
 KERNEL_PID_FILE = "/tmp/.eg_kernel_launcher.pid"
@@ -66,156 +66,217 @@ RECONNECT_RESPONSE_ADDR_OVERRIDE = "/tmp/.eg_reconnect_response_addr"
 RECONNECT_MAX_RETRIES = int(os.getenv("EG_RECONNECT_MAX_RETRIES", "10"))
 RECONNECT_BASE_DELAY = float(os.getenv("EG_RECONNECT_BASE_DELAY", "2"))
 
-# Environment variable names used by JEG to inject kernel launch parameters.
-# After CRIU restore the container may carry new values for the destination
-# cluster; these take priority over the CRIU-restored process memory.
-_ENV_KERNEL_ID = "KERNEL_ID"
-_ENV_PUBLIC_KEY = "PUBLIC_KEY"
-_ENV_RESPONSE_ADDRESS = "EG_RESPONSE_ADDRESS"
 
+class _MigrationHandler:
+    """Self-contained handler for post-CRIU-restore reconnection.
 
-def _read_container_env():
-    """Read the container-level environment from ``/proc/1/environ``.
+    ``start_ipython(locals())`` wipes all module-level names that don't start
+    with ``__``.  Every standard-library module, the ``_encrypt`` helper,
+    ``logger``, and the ``_migration_params`` dict all disappear from the
+    module namespace.
 
-    After CRIU restore ``os.environ`` still holds the checkpointed values.
-    The container runtime (CRI-O) may have injected a *different* set of env
-    vars into the restored container via the OCI spec.  ``/proc/1/environ``
-    reflects the actual container environment and is the most reliable source.
-    """
-    env = {}
-    try:
-        with open("/proc/1/environ", "rb") as f:
-            data = f.read()
-        for item in data.split(b"\0"):
-            if b"=" in item:
-                key, _, value = item.partition(b"=")
-                env[key.decode("utf-8", errors="replace")] = value.decode(
-                    "utf-8", errors="replace"
-                )
-    except Exception as e:
-        logger.debug("Could not read /proc/1/environ: %s", e)
-    return env
+    This class captures the values it needs at construction time and
+    re-imports standard-library modules inside each method so it remains
+    fully functional after the namespace cleanup.
 
-
-def _resolve_reconnect_params():
-    """Build the effective parameter set for reconnection.
-
-    Resolution order (highest priority first):
-      1. ``/tmp/.eg_reconnect_response_addr`` file  (for response_addr only)
+    Env-var resolution order (highest priority first):
+      1. ``/tmp/.eg_reconnect_response_addr`` file  (response_addr only)
       2. Container environment  (``/proc/1/environ``)
       3. Process environment    (``os.environ`` – stale after CRIU restore)
       4. ``_migration_params``  (values stored at initial launch)
     """
-    params = dict(_migration_params)  # shallow copy as base
 
-    # --- layer: process env (os.environ, may be stale post-CRIU) -----------
-    if os.environ.get(_ENV_KERNEL_ID):
-        params["kernel_id"] = os.environ[_ENV_KERNEL_ID]
-    if os.environ.get(_ENV_PUBLIC_KEY):
-        params["public_key"] = os.environ[_ENV_PUBLIC_KEY]
-    if os.environ.get(_ENV_RESPONSE_ADDRESS):
-        params["response_addr"] = os.environ[_ENV_RESPONSE_ADDRESS]
+    ENV_KERNEL_ID = "KERNEL_ID"
+    ENV_PUBLIC_KEY = "PUBLIC_KEY"
+    ENV_RESPONSE_ADDRESS = "EG_RESPONSE_ADDRESS"
+    RESPONSE_ADDR_OVERRIDE_PATH = RECONNECT_RESPONSE_ADDR_OVERRIDE
 
-    # --- layer: container env (/proc/1/environ – authoritative) -----------
-    container_env = _read_container_env()
-    if container_env.get(_ENV_KERNEL_ID):
-        params["kernel_id"] = container_env[_ENV_KERNEL_ID]
-    if container_env.get(_ENV_PUBLIC_KEY):
-        params["public_key"] = container_env[_ENV_PUBLIC_KEY]
-    if container_env.get(_ENV_RESPONSE_ADDRESS):
-        params["response_addr"] = container_env[_ENV_RESPONSE_ADDRESS]
+    def __init__(self, params, max_retries, base_delay):
+        self._params = params
+        self._max_retries = max_retries
+        self._base_delay = base_delay
 
-    # --- layer: file override (response address only) ----------------------
-    if os.path.exists(RECONNECT_RESPONSE_ADDR_OVERRIDE):
+    # -- signal entry point ------------------------------------------------
+
+    def signal_handler(self, signum, frame):
+        """SIGUSR1 handler – schedules an async re-send of connection info."""
+        import logging
+        from threading import Thread
+
+        logging.getLogger("launch_ipykernel").info(
+            "Received signal %d – scheduling connection info re-send", signum
+        )
+        Thread(target=self._resend_connection_info, daemon=True).start()
+
+    # -- environment helpers -----------------------------------------------
+
+    @staticmethod
+    def _read_container_env():
+        """Read the container-level environment from ``/proc/1/environ``.
+
+        After CRIU restore ``os.environ`` still holds the checkpointed
+        values.  The container runtime (CRI-O) may have injected different
+        env vars into the restored container via the OCI spec.
+        ``/proc/1/environ`` reflects those actual values.
+        """
+        env = {}
         try:
-            with open(RECONNECT_RESPONSE_ADDR_OVERRIDE) as f:
-                override = f.read().strip()
-            if override:
-                params["response_addr"] = override
-        except Exception as e:
-            logger.warning("Failed to read response address override file: %s", e)
+            with open("/proc/1/environ", "rb") as f:
+                data = f.read()
+            for item in data.split(b"\0"):
+                if b"=" in item:
+                    key, _, value = item.partition(b"=")
+                    env[key.decode("utf-8", errors="replace")] = value.decode(
+                        "utf-8", errors="replace"
+                    )
+        except Exception:
+            pass
+        return env
 
-    return params
+    def _resolve_params(self):
+        """Build effective params: container env > process env > stored."""
+        import os
 
+        params = dict(self._params)
 
-def _do_resend_connection_info(params, response_addr):
-    """Send the current kernel connection info to JEG at *response_addr*."""
-    response_parts = response_addr.split(":")
-    if len(response_parts) != 2:
-        raise ValueError(f"Invalid response address format: '{response_addr}'")
+        # layer: process env (os.environ – may be stale post-CRIU)
+        if os.environ.get(self.ENV_KERNEL_ID):
+            params["kernel_id"] = os.environ[self.ENV_KERNEL_ID]
+        if os.environ.get(self.ENV_PUBLIC_KEY):
+            params["public_key"] = os.environ[self.ENV_PUBLIC_KEY]
+        if os.environ.get(self.ENV_RESPONSE_ADDRESS):
+            params["response_addr"] = os.environ[self.ENV_RESPONSE_ADDRESS]
 
-    response_ip = response_parts[0]
-    response_port = int(response_parts[1])
+        # layer: container env (/proc/1/environ – authoritative)
+        container_env = self._read_container_env()
+        if container_env.get(self.ENV_KERNEL_ID):
+            params["kernel_id"] = container_env[self.ENV_KERNEL_ID]
+        if container_env.get(self.ENV_PUBLIC_KEY):
+            params["public_key"] = container_env[self.ENV_PUBLIC_KEY]
+        if container_env.get(self.ENV_RESPONSE_ADDRESS):
+            params["response_addr"] = container_env[self.ENV_RESPONSE_ADDRESS]
 
-    with open(params["connection_file"]) as fp:
-        cf_json = json.load(fp)
+        # layer: file override (response address only)
+        if os.path.exists(self.RESPONSE_ADDR_OVERRIDE_PATH):
+            try:
+                with open(self.RESPONSE_ADDR_OVERRIDE_PATH) as f:
+                    override = f.read().strip()
+                if override:
+                    params["response_addr"] = override
+            except Exception:
+                pass
 
-    pid = os.getpid()
-    cf_json["pid"] = pid
-    cf_json["pgid"] = os.getpgid(pid)
-    cf_json["comm_port"] = params["comm_port"]
-    cf_json["kernel_id"] = params["kernel_id"]
+        return params
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(30)
-        s.connect((response_ip, response_port))
-        json_content = json.dumps(cf_json).encode(encoding="utf-8")
-        logger.debug(f"Resend JSON Payload '{json_content}")
-        payload = _encrypt(json_content, params["public_key"])
-        logger.debug(f"Resend Encrypted Payload '{payload}")
-        s.send(payload)
+    # -- encryption (duplicated to be self-contained) ----------------------
 
+    @staticmethod
+    def _encrypt(connection_info_str, public_key):
+        """Encrypt connection info – standalone re-import of Cryptodome."""
+        import base64
+        import json
 
-def _resend_connection_info():
-    """Re-send connection info to JEG with retry & exponential backoff.
+        from Cryptodome.Cipher import AES, PKCS1_v1_5
+        from Cryptodome.PublicKey import RSA
+        from Cryptodome.Random import get_random_bytes
+        from Cryptodome.Util.Padding import pad
 
-    On every invocation the effective ``kernel_id``, ``public_key``, and
-    ``response_addr`` are resolved fresh from the container environment so
-    that values injected by the orchestration layer for the *restored*
-    container take precedence over the CRIU-snapshotted process state.
-    """
-    if not _migration_params:
-        logger.warning("Migration params not initialised – cannot resend connection info")
-        return
+        aes_key = get_random_bytes(16)
+        cipher = AES.new(aes_key, mode=AES.MODE_ECB)
 
-    params = _resolve_reconnect_params()
-    response_addr = params["response_addr"]
+        encrypted_connection_info = cipher.encrypt(pad(connection_info_str, 16))
+        b64_connection_info = base64.b64encode(encrypted_connection_info)
 
-    logger.info(
-        "Reconnection parameters resolved – kernel_id=%s, response_addr=%s",
-        params.get("kernel_id", "<unset>"),
-        response_addr,
-    )
+        imported_public_key = RSA.importKey(base64.b64decode(public_key.encode()))
+        cipher = PKCS1_v1_5.new(key=imported_public_key)
+        encrypted_key = base64.b64encode(cipher.encrypt(aes_key))
 
-    for attempt in range(1, RECONNECT_MAX_RETRIES + 1):
-        try:
-            _do_resend_connection_info(params, response_addr)
-            logger.info(
-                "Successfully re-sent connection info to JEG at %s (attempt %d)",
-                response_addr,
-                attempt,
-            )
+        payload = {
+            "version": 1,
+            "key": encrypted_key.decode(),
+            "conn_info": b64_connection_info.decode(),
+        }
+        return base64.b64encode(json.dumps(payload).encode(encoding="utf-8"))
+
+    # -- resend logic ------------------------------------------------------
+
+    def _do_resend(self, params, response_addr):
+        """Send current kernel connection info to JEG at *response_addr*."""
+        import json
+        import logging
+        import os
+        import socket
+
+        log = logging.getLogger("launch_ipykernel")
+
+        parts = response_addr.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid response address format: '{response_addr}'")
+
+        response_ip = parts[0]
+        response_port = int(parts[1])
+
+        with open(params["connection_file"]) as fp:
+            cf_json = json.load(fp)
+
+        pid = os.getpid()
+        cf_json["pid"] = pid
+        cf_json["pgid"] = os.getpgid(pid)
+        cf_json["comm_port"] = params["comm_port"]
+        cf_json["kernel_id"] = params["kernel_id"]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(30)
+            s.connect((response_ip, response_port))
+            json_content = json.dumps(cf_json).encode(encoding="utf-8")
+            log.debug("Resend JSON Payload '%s'", json_content)
+            payload = self._encrypt(json_content, params["public_key"])
+            log.debug("Resend Encrypted Payload '%s'", payload)
+            s.send(payload)
+
+    def _resend_connection_info(self):
+        """Re-send with retry & exponential backoff."""
+        import logging
+        import time
+
+        log = logging.getLogger("launch_ipykernel")
+
+        if not self._params:
+            log.warning("Migration params not initialised – cannot resend")
             return
-        except Exception as e:
-            delay = min(RECONNECT_BASE_DELAY * (2 ** (attempt - 1)), 60)
-            logger.warning(
-                "Resend attempt %d/%d failed: %s – retrying in %.1fs",
-                attempt,
-                RECONNECT_MAX_RETRIES,
-                e,
-                delay,
-            )
-            time.sleep(delay)
 
-    logger.error(
-        "Failed to re-send connection info after %d attempts", RECONNECT_MAX_RETRIES
-    )
+        params = self._resolve_params()
+        response_addr = params["response_addr"]
 
+        log.info(
+            "Reconnection parameters resolved – kernel_id=%s, response_addr=%s",
+            params.get("kernel_id", "<unset>"),
+            response_addr,
+        )
 
-def _handle_resend_signal(signum, frame):
-    """SIGUSR1 handler – triggers an async re-send of kernel connection info."""
-    logger.info("Received signal %d – scheduling connection info re-send", signum)
-    Thread(target=_resend_connection_info, daemon=True).start()
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                self._do_resend(params, response_addr)
+                log.info(
+                    "Successfully re-sent connection info to JEG at %s (attempt %d)",
+                    response_addr,
+                    attempt,
+                )
+                return
+            except Exception as e:
+                delay = min(self._base_delay * (2 ** (attempt - 1)), 60)
+                log.warning(
+                    "Resend attempt %d/%d failed: %s – retrying in %.1fs",
+                    attempt,
+                    self._max_retries,
+                    e,
+                    delay,
+                )
+                time.sleep(delay)
+
+        log.error(
+            "Failed to re-send connection info after %d attempts", self._max_retries
+        )
 
 
 def _write_pid_file():
@@ -835,7 +896,13 @@ if __name__ == "__main__":
                     "comm_port": comm_socket.getsockname()[1],
                 })
                 _write_pid_file()
-                signal.signal(signal.SIGUSR1, _handle_resend_signal)
+                # The handler instance is kept alive by the signal subsystem's
+                # reference to its bound method, so it survives the namespace
+                # cleanup performed by start_ipython(locals()).
+                _reconnect_handler = _MigrationHandler(
+                    _migration_params, RECONNECT_MAX_RETRIES, RECONNECT_BASE_DELAY
+                )
+                signal.signal(signal.SIGUSR1, _reconnect_handler.signal_handler)
                 logger.info(
                     "Migration-aware reconnection enabled (SIGUSR1 handler registered, PID=%d)",
                     os.getpid(),
