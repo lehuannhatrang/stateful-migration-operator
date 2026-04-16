@@ -17,7 +17,7 @@ spec:
       serviceAccountName: checkpoint-apiserver-sa
       containers:
       - name: apiserver
-        image: lehuannhatrang/stateful-migration-operator:checkpointApiserver_v2.11
+        image: lehuannhatrang/stateful-migration-operator:checkpointApiserver_v2.12
         command:
         - /apiserver
         args:

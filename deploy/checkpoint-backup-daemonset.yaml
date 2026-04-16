@@ -42,6 +42,7 @@ spec:
         - --enable-checkpoint-backup-controller=true
         - --enable-migration-backup-controller=false
         - --enable-migration-restore-controller=false
+        - --enable-kernel-reconnect-controller=true
         env:
         - name: NODE_NAME
           valueFrom:

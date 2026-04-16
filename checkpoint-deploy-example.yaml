@@ -17,7 +17,7 @@ spec:
       hostNetwork: true
       containers:
       - name: controller
-        image: lehuannhatrang/stateful-migration-operator:checkpointBackup_v2.11
+        image: lehuannhatrang/stateful-migration-operator:checkpointBackup_v2.12
         env:
         - name: NODE_NAME
           valueFrom:

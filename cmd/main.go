@@ -42,6 +42,7 @@ import (
 	karmadav1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	migrationv1 "github.com/lehuannhatrang/stateful-migration-operator/api/v1"
 	"github.com/lehuannhatrang/stateful-migration-operator/internal/controller"
+	"k8s.io/client-go/kubernetes"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -72,6 +73,7 @@ func main() {
 	var enableCheckpointBackupController bool
 	var enableMigrationBackupController bool
 	var enableMigrationRestoreController bool
+	var enableKernelReconnectController bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -87,6 +89,8 @@ func main() {
 		"Enable the MigrationBackup controller (runs on Karmada control plane).")
 	flag.BoolVar(&enableMigrationRestoreController, "enable-migration-restore-controller", true,
 		"Enable the MigrationRestore controller (runs on Karmada control plane).")
+	flag.BoolVar(&enableKernelReconnectController, "enable-kernel-reconnect-controller", false,
+		"Enable the KernelReconnect controller that signals restored Jupyter kernel pods to re-send connection info.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
@@ -260,8 +264,28 @@ func main() {
 		}
 	}
 
+	if enableKernelReconnectController {
+		setupLog.Info("Setting up KernelReconnect controller")
+
+		clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "unable to create Kubernetes clientset for KernelReconnect controller")
+			os.Exit(1)
+		}
+
+		if err := (&controller.KernelReconnectReconciler{
+			Client:     mgr.GetClient(),
+			Scheme:     mgr.GetScheme(),
+			Clientset:  clientset,
+			RestConfig: mgr.GetConfig(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "KernelReconnect")
+			os.Exit(1)
+		}
+	}
+
 	// Ensure at least one controller is enabled
-	if !enableCheckpointBackupController && !enableMigrationBackupController && !enableMigrationRestoreController {
+	if !enableCheckpointBackupController && !enableMigrationBackupController && !enableMigrationRestoreController && !enableKernelReconnectController {
 		setupLog.Error(nil, "At least one controller must be enabled")
 		os.Exit(1)
 	}
