@@ -88,6 +88,10 @@ type CheckpointMetadata struct {
 	// +optional
 	KernelID string `json:"kernelId,omitempty"`
 
+	// SessionID is the Jupyter session ID associated with this checkpoint
+	// +optional
+	SessionID string `json:"sessionId,omitempty"`
+
 	// KernelName is the human-readable name of the Jupyter kernel
 	// +optional
 	KernelName string `json:"kernelName,omitempty"`

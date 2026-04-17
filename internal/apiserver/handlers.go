@@ -124,6 +124,7 @@ func (s *Server) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) 
 	if req.Metadata != nil {
 		meta := &migrationv1.CheckpointMetadata{
 			KernelID:     req.Metadata.KernelID,
+			SessionID:    req.Metadata.SessionID,
 			KernelName:   req.Metadata.KernelName,
 			NotebookName: req.Metadata.NotebookName,
 		}
@@ -419,6 +420,7 @@ func toCheckpointResponse(backup *migrationv1.CheckpointBackup) CheckpointRespon
 	if backup.Spec.Metadata != nil {
 		metaResp := &CheckpointMetadataResp{
 			KernelID:     backup.Spec.Metadata.KernelID,
+			SessionID:    backup.Spec.Metadata.SessionID,
 			KernelName:   backup.Spec.Metadata.KernelName,
 			NotebookName: backup.Spec.Metadata.NotebookName,
 		}

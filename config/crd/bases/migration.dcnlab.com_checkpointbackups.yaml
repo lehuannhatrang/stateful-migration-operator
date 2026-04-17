@@ -102,6 +102,10 @@ spec:
                     description: NotebookName is the name of the notebook associated
                       with this checkpoint
                     type: string
+                  sessionId:
+                    description: SessionID is the Jupyter session ID associated with
+                      this checkpoint
+                    type: string
                 type: object
               podRef:
                 description: PodRef specifies the pod to checkpoint

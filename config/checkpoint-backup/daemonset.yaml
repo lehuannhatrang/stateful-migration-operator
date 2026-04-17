@@ -33,7 +33,7 @@ spec:
         effect: NoExecute
       containers:
       - name: controller
-        image: docker.io/lehuannhatrang/stateful-migration-operator:checkpointBackup_v2.12
+        image: docker.io/lehuannhatrang/stateful-migration-operator:checkpointBackup_v2.16
         imagePullPolicy: IfNotPresent
         command:
         - /manager

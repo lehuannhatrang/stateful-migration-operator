@@ -46,6 +46,7 @@ type BusyCellRequest struct {
 // CheckpointMetadataRequest holds optional contextual information sent with the create request.
 type CheckpointMetadataRequest struct {
 	KernelID     string            `json:"kernelId,omitempty"`
+	SessionID    string            `json:"sessionId,omitempty"`
 	KernelName   string            `json:"kernelName,omitempty"`
 	NotebookName string            `json:"notebookName,omitempty"`
 	BusyCells    []BusyCellRequest `json:"busyCells,omitempty"`
@@ -123,6 +124,7 @@ type BusyCellResp struct {
 // CheckpointMetadataResp is the metadata section returned in checkpoint responses.
 type CheckpointMetadataResp struct {
 	KernelID     string         `json:"kernelId,omitempty"`
+	SessionID    string         `json:"sessionId,omitempty"`
 	KernelName   string         `json:"kernelName,omitempty"`
 	NotebookName string         `json:"notebookName,omitempty"`
 	BusyCells    []BusyCellResp `json:"busyCells,omitempty"`
