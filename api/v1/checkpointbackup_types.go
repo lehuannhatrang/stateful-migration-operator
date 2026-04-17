@@ -61,6 +61,26 @@ type CheckpointBackupSpec struct {
 	Metadata *CheckpointMetadata `json:"metadata,omitempty"`
 }
 
+// BusyCell holds information about a notebook cell that was actively executing
+// at the time the checkpoint was requested.
+type BusyCell struct {
+	// CellIndex is the zero-based position of the cell in the notebook
+	// +optional
+	CellIndex int `json:"cellIndex,omitempty"`
+
+	// CellID is the unique identifier of the cell
+	// +optional
+	CellID string `json:"cellId,omitempty"`
+
+	// MsgID is the kernel message ID associated with the cell execution
+	// +optional
+	MsgID string `json:"msgId,omitempty"`
+
+	// ExecutionCount is the execution counter value shown next to the cell
+	// +optional
+	ExecutionCount int `json:"executionCount,omitempty"`
+}
+
 // CheckpointMetadata holds optional contextual information about the checkpoint origin,
 // such as the Jupyter kernel or notebook it was created from.
 type CheckpointMetadata struct {
@@ -75,6 +95,10 @@ type CheckpointMetadata struct {
 	// NotebookName is the name of the notebook associated with this checkpoint
 	// +optional
 	NotebookName string `json:"notebookName,omitempty"`
+
+	// BusyCells is the list of notebook cells that were actively executing when the checkpoint was created
+	// +optional
+	BusyCells []BusyCell `json:"busyCells,omitempty"`
 }
 
 // CheckpointBackupStatus defines the observed state of CheckpointBackup.

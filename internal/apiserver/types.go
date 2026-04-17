@@ -34,11 +34,21 @@ type CreateCheckpointRequest struct {
 	Metadata    *CheckpointMetadataRequest `json:"metadata,omitempty"`
 }
 
+// BusyCellRequest holds information about a notebook cell that was actively executing
+// at the time the checkpoint was requested.
+type BusyCellRequest struct {
+	CellIndex      int    `json:"cellIndex,omitempty"`
+	CellID         string `json:"cellId,omitempty"`
+	MsgID          string `json:"msgId,omitempty"`
+	ExecutionCount int    `json:"executionCount,omitempty"`
+}
+
 // CheckpointMetadataRequest holds optional contextual information sent with the create request.
 type CheckpointMetadataRequest struct {
-	KernelID     string `json:"kernelId,omitempty"`
-	KernelName   string `json:"kernelName,omitempty"`
-	NotebookName string `json:"notebookName,omitempty"`
+	KernelID     string            `json:"kernelId,omitempty"`
+	KernelName   string            `json:"kernelName,omitempty"`
+	NotebookName string            `json:"notebookName,omitempty"`
+	BusyCells    []BusyCellRequest `json:"busyCells,omitempty"`
 }
 
 // ResourceRefRequest maps to the CRD ResourceRef.
@@ -101,11 +111,21 @@ type CheckpointResponse struct {
 	CreatedAt          time.Time               `json:"createdAt"`
 }
 
+// BusyCellResp holds information about a notebook cell that was actively executing
+// at the time the checkpoint was created.
+type BusyCellResp struct {
+	CellIndex      int    `json:"cellIndex,omitempty"`
+	CellID         string `json:"cellId,omitempty"`
+	MsgID          string `json:"msgId,omitempty"`
+	ExecutionCount int    `json:"executionCount,omitempty"`
+}
+
 // CheckpointMetadataResp is the metadata section returned in checkpoint responses.
 type CheckpointMetadataResp struct {
-	KernelID     string `json:"kernelId,omitempty"`
-	KernelName   string `json:"kernelName,omitempty"`
-	NotebookName string `json:"notebookName,omitempty"`
+	KernelID     string         `json:"kernelId,omitempty"`
+	KernelName   string         `json:"kernelName,omitempty"`
+	NotebookName string         `json:"notebookName,omitempty"`
+	BusyCells    []BusyCellResp `json:"busyCells,omitempty"`
 }
 
 // PodRefResponse is the pod reference in the API response.

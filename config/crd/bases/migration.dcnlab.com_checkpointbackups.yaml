@@ -65,6 +65,31 @@ spec:
                 description: Metadata holds optional contextual information about
                   the checkpoint origin
                 properties:
+                  busyCells:
+                    description: BusyCells is the list of notebook cells that were
+                      actively executing when the checkpoint was created
+                    items:
+                      description: |-
+                        BusyCell holds information about a notebook cell that was actively executing
+                        at the time the checkpoint was requested.
+                      properties:
+                        cellId:
+                          description: CellID is the unique identifier of the cell
+                          type: string
+                        cellIndex:
+                          description: CellIndex is the zero-based position of the
+                            cell in the notebook
+                          type: integer
+                        executionCount:
+                          description: ExecutionCount is the execution counter value
+                            shown next to the cell
+                          type: integer
+                        msgId:
+                          description: MsgID is the kernel message ID associated with
+                            the cell execution
+                          type: string
+                      type: object
+                    type: array
                   kernelId:
                     description: KernelID is the Jupyter kernel ID associated with
                       this checkpoint

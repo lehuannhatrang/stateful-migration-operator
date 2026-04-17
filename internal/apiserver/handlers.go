@@ -122,11 +122,20 @@ func (s *Server) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if req.Metadata != nil {
-		backup.Spec.Metadata = &migrationv1.CheckpointMetadata{
+		meta := &migrationv1.CheckpointMetadata{
 			KernelID:     req.Metadata.KernelID,
 			KernelName:   req.Metadata.KernelName,
 			NotebookName: req.Metadata.NotebookName,
 		}
+		for _, bc := range req.Metadata.BusyCells {
+			meta.BusyCells = append(meta.BusyCells, migrationv1.BusyCell{
+				CellIndex:      bc.CellIndex,
+				CellID:         bc.CellID,
+				MsgID:          bc.MsgID,
+				ExecutionCount: bc.ExecutionCount,
+			})
+		}
+		backup.Spec.Metadata = meta
 		if req.Metadata.KernelID != "" {
 			if backup.ObjectMeta.Labels == nil {
 				backup.ObjectMeta.Labels = make(map[string]string)
@@ -408,11 +417,20 @@ func toCheckpointResponse(backup *migrationv1.CheckpointBackup) CheckpointRespon
 	}
 
 	if backup.Spec.Metadata != nil {
-		resp.Metadata = &CheckpointMetadataResp{
+		metaResp := &CheckpointMetadataResp{
 			KernelID:     backup.Spec.Metadata.KernelID,
 			KernelName:   backup.Spec.Metadata.KernelName,
 			NotebookName: backup.Spec.Metadata.NotebookName,
 		}
+		for _, bc := range backup.Spec.Metadata.BusyCells {
+			metaResp.BusyCells = append(metaResp.BusyCells, BusyCellResp{
+				CellIndex:      bc.CellIndex,
+				CellID:         bc.CellID,
+				MsgID:          bc.MsgID,
+				ExecutionCount: bc.ExecutionCount,
+			})
+		}
+		resp.Metadata = metaResp
 	}
 
 	if backup.Status.LastCheckpointTime != nil {
