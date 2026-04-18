@@ -81,14 +81,19 @@ class _MigrationHandler:
 
     Env-var resolution order (highest priority first):
       1. ``/tmp/.eg_reconnect_response_addr`` file  (response_addr only)
-      2. Container environment  (``/proc/1/environ``)
-      3. Process environment    (``os.environ`` – stale after CRIU restore)
-      4. ``_migration_params``  (values stored at initial launch)
+      2. Container PID 1 environment (``/proc/1/environ``)
+      3. Current process environment (``/proc/self/environ``)
+      4. Process environment    (``os.environ`` – stale after CRIU restore)
+      5. ``_migration_params``  (values stored at initial launch)
+
+    For the response address, both ``EG_RESPONSE_ADDRESS`` and
+    ``RESPONSE_ADDRESS`` are checked at each layer.
     """
 
     ENV_KERNEL_ID = "KERNEL_ID"
     ENV_PUBLIC_KEY = "PUBLIC_KEY"
     ENV_RESPONSE_ADDRESS = "EG_RESPONSE_ADDRESS"
+    ENV_RESPONSE_ADDRESS_ALT = "RESPONSE_ADDRESS"
     RESPONSE_ADDR_OVERRIDE_PATH = RECONNECT_RESPONSE_ADDR_OVERRIDE
 
     def __init__(self, params, max_retries, base_delay):
@@ -111,8 +116,8 @@ class _MigrationHandler:
     # -- environment helpers -----------------------------------------------
 
     @staticmethod
-    def _read_container_env():
-        """Read the container-level environment from ``/proc/1/environ``.
+    def _read_proc_environ(path):
+        """Read a ``/proc/*/environ`` file and return it as a dict.
 
         After CRIU restore ``os.environ`` still holds the checkpointed
         values.  The container runtime (CRI-O) may have injected different
@@ -121,7 +126,7 @@ class _MigrationHandler:
         """
         env = {}
         try:
-            with open("/proc/1/environ", "rb") as f:
+            with open(path, "rb") as f:
                 data = f.read()
             for item in data.split(b"\0"):
                 if b"=" in item:
@@ -133,28 +138,71 @@ class _MigrationHandler:
             pass
         return env
 
+    def _get_response_addr(self, env, source_label):
+        """Return the response address from *env* dict, checking both
+        ``EG_RESPONSE_ADDRESS`` and ``RESPONSE_ADDRESS``.  Returns the
+        value and the key that matched, or ``(None, None)``.
+        """
+        import logging
+
+        log = logging.getLogger("launch_ipykernel")
+        for key in (self.ENV_RESPONSE_ADDRESS, self.ENV_RESPONSE_ADDRESS_ALT):
+            val = env.get(key)
+            if val:
+                log.debug(
+                    "Found response address in %s: %s=%s", source_label, key, val
+                )
+                return val, key
+        return None, None
+
     def _resolve_params(self):
-        """Build effective params: container env > process env > stored."""
+        """Build effective params with updated env vars after CRIU restore.
+
+        Resolution order (last write wins):
+          1. ``_migration_params`` (values stored at initial launch)
+          2. Process environment (``os.environ`` - may be stale post-CRIU)
+          3. ``/proc/self/environ`` (current process env from the kernel)
+          4. ``/proc/1/environ`` (container PID 1 - authoritative)
+          5. ``/tmp/.eg_reconnect_response_addr`` file override
+        """
+        import logging
         import os
 
+        log = logging.getLogger("launch_ipykernel")
         params = dict(self._params)
+        log.debug(
+            "Resolve params – stored response_addr=%s",
+            params.get("response_addr", "<unset>"),
+        )
 
         # layer: process env (os.environ – may be stale post-CRIU)
         if os.environ.get(self.ENV_KERNEL_ID):
             params["kernel_id"] = os.environ[self.ENV_KERNEL_ID]
         if os.environ.get(self.ENV_PUBLIC_KEY):
             params["public_key"] = os.environ[self.ENV_PUBLIC_KEY]
-        if os.environ.get(self.ENV_RESPONSE_ADDRESS):
-            params["response_addr"] = os.environ[self.ENV_RESPONSE_ADDRESS]
+        addr, _key = self._get_response_addr(dict(os.environ), "os.environ")
+        if addr:
+            params["response_addr"] = addr
 
-        # layer: container env (/proc/1/environ – authoritative)
-        container_env = self._read_container_env()
+        # layer: /proc/self/environ (restored process – may differ from PID 1)
+        self_env = self._read_proc_environ("/proc/self/environ")
+        if self_env.get(self.ENV_KERNEL_ID):
+            params["kernel_id"] = self_env[self.ENV_KERNEL_ID]
+        if self_env.get(self.ENV_PUBLIC_KEY):
+            params["public_key"] = self_env[self.ENV_PUBLIC_KEY]
+        addr, _key = self._get_response_addr(self_env, "/proc/self/environ")
+        if addr:
+            params["response_addr"] = addr
+
+        # layer: /proc/1/environ (container PID 1 – authoritative)
+        container_env = self._read_proc_environ("/proc/1/environ")
         if container_env.get(self.ENV_KERNEL_ID):
             params["kernel_id"] = container_env[self.ENV_KERNEL_ID]
         if container_env.get(self.ENV_PUBLIC_KEY):
             params["public_key"] = container_env[self.ENV_PUBLIC_KEY]
-        if container_env.get(self.ENV_RESPONSE_ADDRESS):
-            params["response_addr"] = container_env[self.ENV_RESPONSE_ADDRESS]
+        addr, _key = self._get_response_addr(container_env, "/proc/1/environ")
+        if addr:
+            params["response_addr"] = addr
 
         # layer: file override (response address only)
         if os.path.exists(self.RESPONSE_ADDR_OVERRIDE_PATH):
@@ -162,10 +210,19 @@ class _MigrationHandler:
                 with open(self.RESPONSE_ADDR_OVERRIDE_PATH) as f:
                     override = f.read().strip()
                 if override:
+                    log.debug(
+                        "Found response address override in %s: %s",
+                        self.RESPONSE_ADDR_OVERRIDE_PATH,
+                        override,
+                    )
                     params["response_addr"] = override
             except Exception:
                 pass
 
+        log.debug(
+            "Resolve params – final response_addr=%s",
+            params.get("response_addr", "<unset>"),
+        )
         return params
 
     # -- encryption (duplicated to be self-contained) ----------------------
