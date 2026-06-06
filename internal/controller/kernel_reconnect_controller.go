@@ -44,6 +44,16 @@ const (
 	KernelComponentValue        = "kernel"
 	CRIORestoreAnnotationPrefix = "checkpoint-restore.crio.io/"
 	KernelPIDFile               = "/tmp/.eg_kernel_launcher.pid"
+	// KernelReconnectAddrFile is the override file the launcher reads (with
+	// highest priority) to discover the current JEG response address after a
+	// CRIU restore. The launcher process was restored by CRIU, so its
+	// /proc/self/environ, /proc/1/environ and os.environ all still hold the
+	// stale response address captured at checkpoint time. A freshly-exec'd
+	// process (this controller's exec), on the other hand, sees the env the
+	// container runtime currently injects — i.e. the *new* RESPONSE_ADDRESS.
+	// We bridge that fresh value into this file so the restored launcher can
+	// read it.
+	KernelReconnectAddrFile = "/tmp/.eg_reconnect_response_addr"
 )
 
 // KernelReconnectReconciler watches for restored Jupyter kernel pods and sends
@@ -135,7 +145,17 @@ func (r *KernelReconnectReconciler) sendReconnectSignal(ctx context.Context, pod
 		containerName = pod.Spec.Containers[0].Name
 	}
 
-	cmd := []string{"sh", "-c", fmt.Sprintf("kill -USR1 $(cat %s)", KernelPIDFile)}
+	// Bridge the *current* response address into the override file before
+	// signaling. This exec runs as a fresh process, so $RESPONSE_ADDRESS
+	// reflects the env the runtime injects now (the new JEG pod), not the
+	// stale value frozen inside the CRIU-restored launcher. The launcher
+	// reads KernelReconnectAddrFile with the highest priority during resend.
+	// If $RESPONSE_ADDRESS is unset we leave any existing file untouched and
+	// just signal, preserving previous behaviour.
+	cmd := []string{"sh", "-c", fmt.Sprintf(
+		"if [ -n \"$RESPONSE_ADDRESS\" ]; then printf '%%s' \"$RESPONSE_ADDRESS\" > %s; fi; "+
+			"kill -USR1 $(cat %s)",
+		KernelReconnectAddrFile, KernelPIDFile)}
 
 	execReq := r.Clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
