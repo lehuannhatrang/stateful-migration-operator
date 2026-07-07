@@ -1,0 +1,67 @@
+# Build the manager binary
+FROM golang:1.24-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+
+# Install git (needed for go mod download)
+RUN apk add --no-cache git
+
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the go source
+COPY cmd/main.go cmd/main.go
+COPY api/ api/
+COPY internal/ internal/
+
+# Build with controller-specific configuration
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
+
+# Use Alpine as base image for CheckpointBackup controller to support buildah
+FROM alpine:3.19
+ARG TARGETOS
+ARG TARGETARCH
+
+# Install buildah and required dependencies
+RUN apk add --no-cache \
+    buildah \
+    fuse-overlayfs \
+    shadow \
+    ca-certificates \
+    curl
+
+# Create a non-root user for buildah
+RUN addgroup -g 65532 -S nonroot && \
+    adduser -u 65532 -S nonroot -G nonroot -h /home/nonroot
+
+# Configure buildah storage
+RUN mkdir -p /home/nonroot/.config/containers && \
+    echo '[storage]' > /home/nonroot/.config/containers/storage.conf && \
+    echo 'driver = "overlay"' >> /home/nonroot/.config/containers/storage.conf && \
+    echo 'runroot = "/home/nonroot/.local/share/containers/storage"' >> /home/nonroot/.config/containers/storage.conf && \
+    echo 'graphroot = "/home/nonroot/.local/share/containers/storage"' >> /home/nonroot/.config/containers/storage.conf && \
+    echo '[storage.options.overlay]' >> /home/nonroot/.config/containers/storage.conf && \
+    echo 'mount_program = "/usr/bin/fuse-overlayfs"' >> /home/nonroot/.config/containers/storage.conf && \
+    chown -R nonroot:nonroot /home/nonroot/.config
+
+# Create directories for container storage
+RUN mkdir -p /home/nonroot/.local/share/containers/storage && \
+    chown -R nonroot:nonroot /home/nonroot/.local/share
+
+WORKDIR /
+COPY --from=builder /workspace/manager .
+
+# Set permissions
+RUN chmod +x /manager
+
+USER nonroot
+
+# Set default controller flags for this variant
+ENTRYPOINT ["/manager", "--enable-checkpoint-backup-controller=true", "--enable-migration-backup-controller=false", "--enable-migration-restore-controller=false"]
