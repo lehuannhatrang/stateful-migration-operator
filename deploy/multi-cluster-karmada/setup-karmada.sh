@@ -142,7 +142,7 @@ echo "1. Build and push your updated controller image:"
 echo "   ./build-and-push.sh lehuannhatrang latest"
 echo
 echo "2. Deploy the controller:"
-echo "   cd deploy && ./deploy.sh lehuannhatrang/stateful-migration-operator:latest"
+echo "   cd deploy/multi-cluster-karmada && ./deploy.sh lehuannhatrang/stateful-migration-operator:latest"
 echo
 echo "3. Verify the controller can connect to Karmada:"
 echo "   kubectl logs -n $NAMESPACE deployment/migration-backup-controller -f"

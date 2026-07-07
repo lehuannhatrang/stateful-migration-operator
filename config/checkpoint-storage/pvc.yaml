@@ -1,0 +1,16 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkpoint-storage
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: checkpoint-storage
+    app.kubernetes.io/part-of: stateful-migration-operator
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi

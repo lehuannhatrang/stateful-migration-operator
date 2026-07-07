@@ -98,8 +98,8 @@ if [[ ${#MISSING_CRDS[@]} -gt 0 ]]; then
     print_status "Installing CRDs..."
     
     # Try to install CRDs from the project
-    if [[ -f "../config/crd/bases/migration.dcnlab.com_statefulmigrations.yaml" ]]; then
-        kubectl apply -f ../config/crd/bases/
+    if [[ -f "../../config/crd/bases/migration.dcnlab.com_statefulmigrations.yaml" ]]; then
+        kubectl apply -f ../../config/crd/bases/
         print_success "CRDs installed from project"
     else
         print_error "CRDs not found. Please install them manually:"

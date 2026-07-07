@@ -229,7 +229,7 @@ print_step "4. Verifying migration backup controller on management cluster"
     print_status "Checking controller deployment..."
     kubectl get deployment migration-backup-controller -n stateful-migration >/dev/null 2>&1 && \
         print_success "Migration backup controller is deployed" || \
-        print_warning "Migration backup controller not found (deploy first with deploy/deploy.sh)"
+        print_warning "Migration backup controller not found (deploy first with deploy/multi-cluster-karmada/deploy.sh)"
     
     # Check if controller is processing our StatefulMigration
     print_status "Checking for CheckpointBackup resources (may take a few minutes)..."

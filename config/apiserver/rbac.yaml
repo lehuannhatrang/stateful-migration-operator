@@ -1,0 +1,52 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: checkpoint-apiserver-sa
+  namespace: stateful-migration
+  labels:
+    app.kubernetes.io/name: checkpoint-apiserver
+    app.kubernetes.io/part-of: stateful-migration-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: checkpoint-apiserver-role
+  labels:
+    app.kubernetes.io/name: checkpoint-apiserver
+    app.kubernetes.io/part-of: stateful-migration-operator
+rules:
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - migration.dcnlab.com
+  resources:
+  - checkpointbackups/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: checkpoint-apiserver-rolebinding
+  labels:
+    app.kubernetes.io/name: checkpoint-apiserver
+    app.kubernetes.io/part-of: stateful-migration-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: checkpoint-apiserver-role
+subjects:
+- kind: ServiceAccount
+  name: checkpoint-apiserver-sa
+  namespace: stateful-migration

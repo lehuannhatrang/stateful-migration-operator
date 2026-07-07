@@ -114,7 +114,7 @@ The deployment script (`deploy.sh`) handles:
 #### 🏗️ **Resources Created**
 1. **Namespace**: `stateful-migration`
 2. **CRDs**: All migration-related CRDs
-3. **RBAC**: Service account and permissions (follows deploy/all-in-one.yaml pattern)
+3. **RBAC**: Service account and permissions (follows deploy/multi-cluster-karmada/all-in-one.yaml pattern)
 4. **Deployment**: MigrationBackup controller
 5. **Service**: Metrics and health endpoints
 
@@ -356,7 +356,7 @@ kubectl --kubeconfig ~/.kube/karmada delete namespace stateful-migration
 ### Remove MigrationBackup Controller
 ```bash
 # Delete all resources from all-in-one manifest (recommended)
-kubectl --kubeconfig ~/.kube/config delete -f deploy/all-in-one.yaml
+kubectl --kubeconfig ~/.kube/config delete -f deploy/multi-cluster-karmada/all-in-one.yaml
 
 # Or delete individual components:
 # Delete deployment and service

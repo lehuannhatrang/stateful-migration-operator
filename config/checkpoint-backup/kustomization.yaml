@@ -9,6 +9,7 @@ metadata:
 resources:
 - namespace.yaml
 - ../rbac/checkpoint_backup_rbac.yaml
+- ../checkpoint-storage/pvc.yaml
 - daemonset.yaml
 
 # Registry credentials secret is intentionally commented out

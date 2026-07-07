@@ -34,6 +34,11 @@ type CheckpointBackupSpec struct {
 	// +optional
 	StopPod *bool `json:"stopPod,omitempty"`
 
+	// BuildImage specifies whether to build a container image from the checkpoint (default: true)
+	// When false, only the checkpoint file is created and stored to checkpoint storage
+	// +optional
+	BuildImage *bool `json:"buildImage,omitempty"`
+
 	// PodRef specifies the pod to checkpoint
 	// +required
 	PodRef PodRef `json:"podRef"`
@@ -50,6 +55,54 @@ type CheckpointBackupSpec struct {
 	// Containers specifies the container configurations for checkpoints
 	// +optional
 	Containers []Container `json:"containers,omitempty"`
+
+	// Metadata holds optional contextual information about the checkpoint origin
+	// +optional
+	Metadata *CheckpointMetadata `json:"metadata,omitempty"`
+}
+
+// BusyCell holds information about a notebook cell that was actively executing
+// at the time the checkpoint was requested.
+type BusyCell struct {
+	// CellIndex is the zero-based position of the cell in the notebook
+	// +optional
+	CellIndex int `json:"cellIndex,omitempty"`
+
+	// CellID is the unique identifier of the cell
+	// +optional
+	CellID string `json:"cellId,omitempty"`
+
+	// MsgID is the kernel message ID associated with the cell execution
+	// +optional
+	MsgID string `json:"msgId,omitempty"`
+
+	// ExecutionCount is the execution counter value shown next to the cell
+	// +optional
+	ExecutionCount int `json:"executionCount,omitempty"`
+}
+
+// CheckpointMetadata holds optional contextual information about the checkpoint origin,
+// such as the Jupyter kernel or notebook it was created from.
+type CheckpointMetadata struct {
+	// KernelID is the Jupyter kernel ID associated with this checkpoint
+	// +optional
+	KernelID string `json:"kernelId,omitempty"`
+
+	// SessionID is the Jupyter session ID associated with this checkpoint
+	// +optional
+	SessionID string `json:"sessionId,omitempty"`
+
+	// KernelName is the human-readable name of the Jupyter kernel
+	// +optional
+	KernelName string `json:"kernelName,omitempty"`
+
+	// NotebookName is the name of the notebook associated with this checkpoint
+	// +optional
+	NotebookName string `json:"notebookName,omitempty"`
+
+	// BusyCells is the list of notebook cells that were actively executing when the checkpoint was created
+	// +optional
+	BusyCells []BusyCell `json:"busyCells,omitempty"`
 }
 
 // CheckpointBackupStatus defines the observed state of CheckpointBackup.
@@ -89,9 +142,13 @@ type CheckpointFile struct {
 	// +required
 	ContainerName string `json:"containerName"`
 
-	// FilePath is the relative path to the checkpoint file
+	// FilePath is the relative path to the checkpoint file on the node
 	// +required
 	FilePath string `json:"filePath"`
+
+	// StoragePath is the path within the checkpoint storage PVC where the file is stored
+	// +optional
+	StoragePath string `json:"storagePath,omitempty"`
 
 	// CheckpointTime is when the checkpoint was created
 	// +optional

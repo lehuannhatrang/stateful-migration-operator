@@ -39,6 +39,11 @@ spec:
           spec:
             description: spec defines the desired state of CheckpointBackup
             properties:
+              buildImage:
+                description: |-
+                  BuildImage specifies whether to build a container image from the checkpoint (default: true)
+                  When false, only the checkpoint file is created and stored to checkpoint storage
+                type: boolean
               containers:
                 description: Containers specifies the container configurations for
                   checkpoints
@@ -56,6 +61,52 @@ spec:
                   - name
                   type: object
                 type: array
+              metadata:
+                description: Metadata holds optional contextual information about
+                  the checkpoint origin
+                properties:
+                  busyCells:
+                    description: BusyCells is the list of notebook cells that were
+                      actively executing when the checkpoint was created
+                    items:
+                      description: |-
+                        BusyCell holds information about a notebook cell that was actively executing
+                        at the time the checkpoint was requested.
+                      properties:
+                        cellId:
+                          description: CellID is the unique identifier of the cell
+                          type: string
+                        cellIndex:
+                          description: CellIndex is the zero-based position of the
+                            cell in the notebook
+                          type: integer
+                        executionCount:
+                          description: ExecutionCount is the execution counter value
+                            shown next to the cell
+                          type: integer
+                        msgId:
+                          description: MsgID is the kernel message ID associated with
+                            the cell execution
+                          type: string
+                      type: object
+                    type: array
+                  kernelId:
+                    description: KernelID is the Jupyter kernel ID associated with
+                      this checkpoint
+                    type: string
+                  kernelName:
+                    description: KernelName is the human-readable name of the Jupyter
+                      kernel
+                    type: string
+                  notebookName:
+                    description: NotebookName is the name of the notebook associated
+                      with this checkpoint
+                    type: string
+                  sessionId:
+                    description: SessionID is the Jupyter session ID associated with
+                      this checkpoint
+                    type: string
+                type: object
               podRef:
                 description: PodRef specifies the pod to checkpoint
                 properties:
@@ -177,7 +228,11 @@ spec:
                       type: string
                     filePath:
                       description: FilePath is the relative path to the checkpoint
-                        file
+                        file on the node
+                      type: string
+                    storagePath:
+                      description: StoragePath is the path within the checkpoint storage
+                        PVC where the file is stored
                       type: string
                   required:
                   - containerName

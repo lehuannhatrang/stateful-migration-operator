@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Single-cluster CheckpointBackup Controller install.
+#
+# This overlay deploys the CheckpointBackup controller onto a single cluster
+# without any Karmada or management-cluster dependency. It bundles the
+# CheckpointBackup CRD together with the controller's namespace, RBAC, storage,
+# and DaemonSet so that a single `kubectl apply -k` produces a working install.
+#
+# Render with:
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone \
+#     config/checkpoint-backup-single-cluster
+#
+# The individual resource files are listed directly (instead of reusing the
+# config/checkpoint-backup base) so image resolution is driven by a single,
+# predictable `images` transformer that deploy/single-cluster/install.sh can
+# override at apply time.
+
+metadata:
+  name: checkpoint-backup-single-cluster
+
+resources:
+- ../crd/bases/migration.dcnlab.com_checkpointbackups.yaml
+- ../checkpoint-backup/namespace.yaml
+- ../rbac/checkpoint_backup_rbac.yaml
+- ../checkpoint-storage/pvc.yaml
+- ../checkpoint-backup/daemonset.yaml
+
+labels:
+- includeSelectors: false
+  pairs:
+    app.kubernetes.io/part-of: stateful-migration-operator
+    app.kubernetes.io/managed-by: single-cluster-install
+
+images:
+- name: docker.io/lehuannhatrang/stateful-migration-operator
+  newTag: checkpointBackup_v2.16

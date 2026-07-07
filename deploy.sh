@@ -381,7 +381,7 @@ deploy_migration_controller() {
     
     # Create temporary deployment file from all-in-one template
     local temp_file="/tmp/migration-deployment-${RANDOM}.yaml"
-    cp deploy/all-in-one.yaml "$temp_file"
+    cp deploy/multi-cluster-karmada/all-in-one.yaml "$temp_file"
     
     # Replace image placeholder with actual image
     if [[ "$DRY_RUN" == false ]]; then
